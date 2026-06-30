@@ -1,6 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { upload } from "@vercel/blob/client";
+import {
+  ACCEPT,
+  INLINE_MAX_BYTES,
+  MAX_FILE_BYTES,
+  isAllowedType,
+} from "@/lib/attachments";
 
 // 모델 선택지 — 라벨은 사람이 읽기 쉽게, 값은 실제 모델 ID.
 const MODELS = [
@@ -9,29 +16,21 @@ const MODELS = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (빠름/저렴)" },
 ] as const;
 
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10MB
-const ALLOWED_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-  "application/pdf",
-]);
-const ACCEPT =
-  "image/png,image/jpeg,image/webp,image/gif,application/pdf";
-
-type Attachment = {
+type UIAttachment = {
   id: string;
   name: string;
   mediaType: string;
-  data: string; // base64 (data: 접두사 제거)
   size: number;
+  data?: string; // 작은 파일: base64 인라인
+  fileId?: string; // 큰 파일: Files API 참조
+  previewUrl?: string; // 이미지 미리보기용 objectURL (전송하지 않음)
+  uploading?: boolean; // Blob+Files 업로드 진행 중
 };
 
 type Message = {
   role: "user" | "assistant";
   content: string;
-  attachments?: Attachment[];
+  attachments?: UIAttachment[];
   error?: boolean;
 };
 
@@ -52,7 +51,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState<string>(MODELS[0].id);
-  const [pending, setPending] = useState<Attachment[]>([]);
+  const [pending, setPending] = useState<UIAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
@@ -61,12 +60,10 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
 
-  // 새 메시지 도착 시 맨 아래로 자동 스크롤
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // textarea 높이 자동 조절
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -76,43 +73,93 @@ export default function Home() {
 
   async function addFiles(list: FileList | File[]) {
     const files = Array.from(list);
-    const accepted: Attachment[] = [];
-    let lastError: string | null = null;
 
     for (const file of files) {
-      if (!ALLOWED_TYPES.has(file.type)) {
-        lastError = `지원하지 않는 형식입니다: ${file.name}`;
+      if (!isAllowedType(file.type)) {
+        setAttachError(`지원하지 않는 형식입니다: ${file.name}`);
         continue;
       }
       if (file.size > MAX_FILE_BYTES) {
-        lastError = `10MB를 초과했습니다: ${file.name}`;
+        setAttachError(`32MB를 초과했습니다: ${file.name}`);
         continue;
       }
-      try {
-        const data = await fileToBase64(file);
-        accepted.push({
-          id: crypto.randomUUID(),
-          name: file.name,
-          mediaType: file.type,
-          data,
-          size: file.size,
-        });
-      } catch {
-        lastError = `파일을 읽지 못했습니다: ${file.name}`;
+
+      const id = crypto.randomUUID();
+      const previewUrl = file.type.startsWith("image/")
+        ? URL.createObjectURL(file)
+        : undefined;
+
+      if (file.size <= INLINE_MAX_BYTES) {
+        // 작은 파일: base64 인라인
+        try {
+          const data = await fileToBase64(file);
+          setPending((prev) => [
+            ...prev,
+            { id, name: file.name, mediaType: file.type, size: file.size, data, previewUrl },
+          ]);
+          setAttachError(null);
+        } catch {
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          setAttachError(`파일을 읽지 못했습니다: ${file.name}`);
+        }
+      } else {
+        // 큰 파일: Blob 직접 업로드 → Files API로 변환 (file_id)
+        setPending((prev) => [
+          ...prev,
+          { id, name: file.name, mediaType: file.type, size: file.size, previewUrl, uploading: true },
+        ]);
+        setAttachError(null);
+        try {
+          const blob = await upload(file.name, file, {
+            access: "public",
+            handleUploadUrl: "/api/blob",
+          });
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: blob.url,
+              name: file.name,
+              mediaType: file.type,
+            }),
+          });
+          if (!res.ok) {
+            let msg = "업로드에 실패했습니다.";
+            try {
+              const d = await res.json();
+              if (d?.error) msg = d.error;
+            } catch {
+              /* noop */
+            }
+            throw new Error(msg);
+          }
+          const { fileId } = (await res.json()) as { fileId: string };
+          setPending((prev) =>
+            prev.map((p) => (p.id === id ? { ...p, fileId, uploading: false } : p)),
+          );
+        } catch (err) {
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          setPending((prev) => prev.filter((p) => p.id !== id));
+          setAttachError(
+            err instanceof Error ? err.message : `업로드 실패: ${file.name}`,
+          );
+        }
       }
     }
-
-    if (accepted.length) setPending((prev) => [...prev, ...accepted]);
-    setAttachError(lastError);
   }
 
   function removeAttachment(id: string) {
-    setPending((prev) => prev.filter((a) => a.id !== id));
+    setPending((prev) => {
+      const target = prev.find((p) => p.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((p) => p.id !== id);
+    });
   }
 
   async function send() {
     const text = input.trim();
-    if ((text === "" && pending.length === 0) || loading) return;
+    const uploading = pending.some((p) => p.uploading);
+    if ((text === "" && pending.length === 0) || loading || uploading) return;
 
     const userMsg: Message = {
       role: "user",
@@ -126,8 +173,6 @@ export default function Home() {
     setPending([]);
     setAttachError(null);
     setLoading(true);
-
-    // 스트리밍으로 채워질 빈 assistant 말풍선을 미리 추가
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
     try {
@@ -139,11 +184,11 @@ export default function Home() {
           messages: nextMessages.map((m) => ({
             role: m.role,
             content: m.content,
-            attachments: m.attachments?.map((a) => ({
-              name: a.name,
-              mediaType: a.mediaType,
-              data: a.data,
-            })),
+            attachments: m.attachments?.map((a) =>
+              a.fileId
+                ? { kind: "file", name: a.name, mediaType: a.mediaType, fileId: a.fileId }
+                : { kind: "inline", name: a.name, mediaType: a.mediaType, data: a.data },
+            ),
           })),
         }),
       });
@@ -229,7 +274,9 @@ export default function Home() {
   }
 
   const isEmpty = messages.length === 0;
-  const canSend = !loading && (input.trim() !== "" || pending.length > 0);
+  const uploading = pending.some((p) => p.uploading);
+  const canSend =
+    !loading && !uploading && (input.trim() !== "" || pending.length > 0);
 
   return (
     <div
@@ -362,7 +409,7 @@ export default function Home() {
               disabled={!canSend}
               className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
             >
-              전송
+              {uploading ? "업로드 중" : "전송"}
             </button>
           </div>
         </div>
@@ -374,7 +421,7 @@ export default function Home() {
           <div className="rounded-2xl border-2 border-dashed border-foreground/40 bg-background px-8 py-6 text-center">
             <p className="text-lg font-medium">여기에 파일을 놓으세요</p>
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-              이미지(PNG·JPG·WebP·GIF) 또는 PDF · 파일당 최대 10MB
+              이미지(PNG·JPG·WebP·GIF) 또는 PDF · 파일당 최대 32MB
             </p>
           </div>
         </div>
@@ -413,23 +460,41 @@ function MessageBubble({ message }: { message: Message }) {
   );
 }
 
-function AttachmentPreview({ att }: { att: Attachment }) {
-  if (att.mediaType.startsWith("image/")) {
+function AttachmentPreview({ att }: { att: UIAttachment }) {
+  const isImage = att.mediaType.startsWith("image/");
+  const src =
+    att.previewUrl ??
+    (att.data ? `data:${att.mediaType};base64,${att.data}` : undefined);
+
+  if (isImage && src) {
     return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={`data:${att.mediaType};base64,${att.data}`}
-        alt={att.name}
-        className="h-20 w-20 rounded-lg border border-black/[.06] object-cover dark:border-white/[.1]"
-      />
+      <div className="relative">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={att.name}
+          className="h-20 w-20 rounded-lg border border-black/[.06] object-cover dark:border-white/[.1]"
+        />
+        {att.uploading && <UploadingOverlay />}
+      </div>
     );
   }
+
   return (
-    <div className="flex h-20 w-32 flex-col justify-center gap-1 rounded-lg border border-black/[.1] bg-background px-3 dark:border-white/[.15]">
+    <div className="relative flex h-20 w-32 flex-col justify-center gap-1 rounded-lg border border-black/[.1] bg-background px-3 dark:border-white/[.15]">
       <span className="text-xl">📄</span>
       <span className="truncate text-xs text-zinc-600 dark:text-zinc-300">
         {att.name}
       </span>
+      {att.uploading && <UploadingOverlay />}
+    </div>
+  );
+}
+
+function UploadingOverlay() {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/40 text-[11px] font-medium text-white">
+      업로드 중…
     </div>
   );
 }

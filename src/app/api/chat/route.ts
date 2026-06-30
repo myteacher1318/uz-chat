@@ -1,5 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { streamClaude } from "@/lib/ai/claude";
+import {
+  INLINE_MAX_BYTES,
+  PDF_TYPE,
+  isAllowedType,
+  isImageMediaType,
+} from "@/lib/attachments";
 
 // ─────────────────────────────────────────────────────────────
 // 허용 모델 — 클라이언트가 임의 모델을 주입하지 못하도록 화이트리스트.
@@ -20,16 +26,6 @@ const MAX_TOKENS = 4096;
 // 비용 보호
 const MAX_MESSAGES = 20; // Claude로 보내는 최근 메시지 개수 (이미지/PDF 포함)
 const MAX_INPUT_CHARS = 8000; // 마지막 메시지 텍스트 최대 길이
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 첨부 파일당 최대 10MB
-
-const ALLOWED_IMAGE_TYPES = [
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-] as const;
-type ImageMediaType = (typeof ALLOWED_IMAGE_TYPES)[number];
-const PDF_TYPE = "application/pdf";
 
 const SYSTEM_PROMPT = `당신은 친절하고 똑똑한 한국어 AI 어시스턴트입니다.
 - 항상 한국어로, 자연스럽고 명확하게 답변합니다.
@@ -40,10 +36,6 @@ const SYSTEM_PROMPT = `당신은 친절하고 똑똑한 한국어 AI 어시스�
 
 // Vercel 서버리스 함수 시간 초과 대비 (초 단위)
 export const maxDuration = 60;
-
-function isImageMediaType(t: string): t is ImageMediaType {
-  return (ALLOWED_IMAGE_TYPES as readonly string[]).includes(t);
-}
 
 // base64 문자열의 대략적인 디코딩 바이트 수
 function approxBytesFromBase64(b64: string): number {
@@ -88,7 +80,10 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 4) 메시지 → Anthropic content 블록으로 변환
-  const built: Anthropic.MessageParam[] = [];
+  //    첨부는 두 가지 형태:
+  //      - kind:"inline" → base64 (작은 파일)
+  //      - kind:"file"   → Files API의 file_id (큰 파일, Blob 경유 업로드 완료)
+  const built: Anthropic.Beta.BetaMessageParam[] = [];
   for (const raw of messages) {
     if (!raw || typeof raw !== "object") continue;
     const m = raw as { role?: unknown; content?: unknown; attachments?: unknown };
@@ -104,38 +99,59 @@ export async function POST(req: Request): Promise<Response> {
     }
 
     // 사용자 메시지: 파일 블록 + 텍스트 블록
-    const blocks: Anthropic.ContentBlockParam[] = [];
+    const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
     const attachments = Array.isArray(m.attachments) ? m.attachments : [];
 
     for (const a of attachments) {
       if (!a || typeof a !== "object") continue;
-      const att = a as { mediaType?: unknown; data?: unknown };
-      if (typeof att.mediaType !== "string" || typeof att.data !== "string") {
-        continue;
-      }
-
-      if (approxBytesFromBase64(att.data) > MAX_FILE_BYTES) {
+      const att = a as {
+        kind?: unknown;
+        mediaType?: unknown;
+        data?: unknown;
+        fileId?: unknown;
+      };
+      if (typeof att.mediaType !== "string" || !isAllowedType(att.mediaType)) {
         return Response.json(
-          { error: "첨부 파일이 너무 큽니다. (파일당 최대 10MB)" },
+          { error: `지원하지 않는 첨부 형식입니다: ${String(att.mediaType)}` },
           { status: 400 },
         );
       }
+      const mt = att.mediaType;
 
-      if (isImageMediaType(att.mediaType)) {
-        blocks.push({
-          type: "image",
-          source: { type: "base64", media_type: att.mediaType, data: att.data },
-        });
-      } else if (att.mediaType === PDF_TYPE) {
-        blocks.push({
-          type: "document",
-          source: { type: "base64", media_type: PDF_TYPE, data: att.data },
-        });
+      if (att.kind === "file" && typeof att.fileId === "string") {
+        // Files API 참조
+        if (isImageMediaType(mt)) {
+          blocks.push({
+            type: "image",
+            source: { type: "file", file_id: att.fileId },
+          });
+        } else {
+          blocks.push({
+            type: "document",
+            source: { type: "file", file_id: att.fileId },
+          });
+        }
+      } else if (att.kind === "inline" && typeof att.data === "string") {
+        // base64 인라인
+        if (approxBytesFromBase64(att.data) > INLINE_MAX_BYTES) {
+          return Response.json(
+            { error: "인라인 첨부가 너무 큽니다." },
+            { status: 400 },
+          );
+        }
+        if (isImageMediaType(mt)) {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: mt, data: att.data },
+          });
+        } else {
+          blocks.push({
+            type: "document",
+            source: { type: "base64", media_type: PDF_TYPE, data: att.data },
+          });
+        }
       } else {
-        return Response.json(
-          { error: `지원하지 않는 첨부 형식입니다: ${att.mediaType}` },
-          { status: 400 },
-        );
+        continue;
       }
     }
 

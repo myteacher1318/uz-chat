@@ -1,10 +1,13 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { toFile } from "@anthropic-ai/sdk";
+
+// Files API는 베타라 messages 호출에도 동일 베타 헤더가 필요하다.
+const FILES_BETA = "files-api-2025-04-14";
 
 export interface StreamOptions {
   model: string;
   system: string;
   /** Anthropic 형식의 메시지. content는 문자열 또는 블록 배열(텍스트+이미지+문서). */
-  messages: Anthropic.MessageParam[];
+  messages: Anthropic.Beta.BetaMessageParam[];
   maxTokens: number;
 }
 
@@ -28,6 +31,7 @@ function getClient(): Anthropic {
 
 /**
  * Claude를 호출해 응답 텍스트를 델타 단위로 흘려보낸다.
+ * file_id 참조(Files API)를 쓰므로 beta messages 엔드포인트를 사용한다.
  *
  * 나중에 OpenAI 등 다른 provider를 추가할 때는 동일한 시그니처의
  * `streamOpenAI` 같은 함수를 옆에 만들고 호출부에서 분기하면 된다.
@@ -40,11 +44,12 @@ export async function* streamClaude({
 }: StreamOptions): AsyncGenerator<string> {
   const anthropic = getClient();
 
-  const stream = anthropic.messages.stream({
+  const stream = anthropic.beta.messages.stream({
     model,
     max_tokens: maxTokens,
     system,
     messages,
+    betas: [FILES_BETA],
   });
 
   for await (const event of stream) {
@@ -55,4 +60,22 @@ export async function* streamClaude({
       yield event.delta.text;
     }
   }
+}
+
+/**
+ * 파일 바이트를 Anthropic Files API에 업로드하고 file_id를 돌려준다.
+ * 큰 파일(이미지/PDF)을 한 번만 업로드해 두고, 이후 대화에서는 file_id로만 참조한다.
+ */
+export async function uploadToAnthropicFiles(
+  data: Buffer,
+  name: string,
+  mediaType: string,
+): Promise<string> {
+  const anthropic = getClient();
+  const file = await toFile(data, name, { type: mediaType });
+  const uploaded = await anthropic.beta.files.upload({
+    file,
+    betas: [FILES_BETA],
+  });
+  return uploaded.id;
 }
