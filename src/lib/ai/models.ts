@@ -13,8 +13,9 @@ export const MODELS: ModelDef[] = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (균형)", provider: "anthropic" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8 (고품질)", provider: "anthropic" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic" },
-  { id: "gpt-4o", label: "GPT-4o (고품질)", provider: "openai" },
-  { id: "gpt-4o-mini", label: "GPT-4o mini (빠름/저렴)", provider: "openai" },
+  { id: "gpt-5.5", label: "GPT-5.5 (최신)", provider: "openai" },
+  { id: "gpt-5.4-mini", label: "GPT-5.4 mini (빠름/저렴)", provider: "openai" },
+  { id: "gpt-4o", label: "GPT-4o (범용)", provider: "openai" },
 ];
 
 export const DEFAULT_MODEL = "claude-sonnet-4-6";
