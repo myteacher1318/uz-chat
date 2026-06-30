@@ -8,13 +8,7 @@ import {
   MAX_FILE_BYTES,
   isAllowedType,
 } from "@/lib/attachments";
-
-// 모델 선택지 — 라벨은 사람이 읽기 쉽게, 값은 실제 모델 ID.
-const MODELS = [
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6 (균형)" },
-  { id: "claude-opus-4-8", label: "Opus 4.8 (고품질)" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (빠름/저렴)" },
-] as const;
+import { MODELS } from "@/lib/ai/models";
 
 type Conversation = { id: string; title: string; updated_at: string };
 

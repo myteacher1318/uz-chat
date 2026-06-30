@@ -1,25 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { streamClaude } from "@/lib/ai/claude";
+import { streamOpenAI } from "@/lib/ai/openai";
+import { resolveModel } from "@/lib/ai/models";
 import { getSupabase } from "@/lib/supabaseServer";
-import {
-  INLINE_MAX_BYTES,
-  PDF_TYPE,
-  isAllowedType,
-  isImageMediaType,
-} from "@/lib/attachments";
-
-// ─────────────────────────────────────────────────────────────
-// 허용 모델 — 클라이언트가 임의 모델을 주입하지 못하도록 화이트리스트.
-//   'claude-sonnet-4-6'          — 속도/품질 균형 (기본)
-//   'claude-opus-4-8'            — 최고 품질 (느리고 비쌈)
-//   'claude-haiku-4-5-20251001'  — 저렴하고 빠름
-// ─────────────────────────────────────────────────────────────
-const ALLOWED_MODELS = [
-  "claude-sonnet-4-6",
-  "claude-opus-4-8",
-  "claude-haiku-4-5-20251001",
-] as const;
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+import { INLINE_MAX_BYTES, isAllowedType } from "@/lib/attachments";
+import type { NeutralAttachment, NeutralMessage } from "@/lib/ai/types";
 
 const MAX_TOKENS = 4096;
 
@@ -124,13 +108,11 @@ export async function POST(req: Request): Promise<Response> {
       ? root.conversationId
       : null;
 
-  // 2) 모델 검증: 허용 목록에 없으면 기본값으로 fallback (임의 모델 주입 방지)
-  const requested = root?.model;
-  const model =
-    typeof requested === "string" &&
-    (ALLOWED_MODELS as readonly string[]).includes(requested)
-      ? requested
-      : DEFAULT_MODEL;
+  // 2) 모델 검증 + provider 결정 (허용 목록에 없으면 기본값으로 fallback)
+  const modelDef = resolveModel(
+    typeof root?.model === "string" ? root.model : undefined,
+  );
+  const model = modelDef.id;
 
   // 3) 마지막 메시지 텍스트 길이 제한
   const lastRaw = messages[messages.length - 1] as
@@ -144,9 +126,8 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // 4) 메시지 → Anthropic content 블록으로 변환
-  //    첨부: kind:"inline"(base64, 작은 파일) / kind:"file"(Files API file_id, 큰 파일)
-  const built: Anthropic.Beta.BetaMessageParam[] = [];
+  // 4) 메시지 → 중립 표현으로 파싱/검증
+  const built: NeutralMessage[] = [];
   for (const raw of messages) {
     if (!raw || typeof raw !== "object") continue;
     const m = raw as { role?: unknown; content?: unknown; attachments?: unknown };
@@ -156,23 +137,22 @@ export async function POST(req: Request): Promise<Response> {
 
     if (m.role === "assistant") {
       if (text.length === 0) continue;
-      built.push({ role: "assistant", content: text });
+      built.push({ role: "assistant", text, attachments: [] });
       continue;
     }
 
-    const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
-    const attachments = Array.isArray(m.attachments) ? m.attachments : [];
-
-    for (const a of attachments) {
+    const attachments: NeutralAttachment[] = [];
+    const rawAtts = Array.isArray(m.attachments) ? m.attachments : [];
+    for (const a of rawAtts) {
       if (!a || typeof a !== "object") continue;
       const att = a as {
         kind?: unknown;
         mediaType?: unknown;
         data?: unknown;
         fileId?: unknown;
+        name?: unknown;
       };
       if (typeof att.mediaType !== "string") continue;
-      // 복원된 메시지의 메타데이터 전용 첨부(데이터 없음)는 건너뜀
       if (att.kind !== "file" && att.kind !== "inline") continue;
       if (!isAllowedType(att.mediaType)) {
         return Response.json(
@@ -180,14 +160,15 @@ export async function POST(req: Request): Promise<Response> {
           { status: 400 },
         );
       }
-      const mt = att.mediaType;
+      const name = typeof att.name === "string" ? att.name : "file";
 
       if (att.kind === "file" && typeof att.fileId === "string") {
-        if (isImageMediaType(mt)) {
-          blocks.push({ type: "image", source: { type: "file", file_id: att.fileId } });
-        } else {
-          blocks.push({ type: "document", source: { type: "file", file_id: att.fileId } });
-        }
+        attachments.push({
+          kind: "file",
+          name,
+          mediaType: att.mediaType,
+          fileId: att.fileId,
+        });
       } else if (att.kind === "inline" && typeof att.data === "string") {
         if (approxBytesFromBase64(att.data) > INLINE_MAX_BYTES) {
           return Response.json(
@@ -195,26 +176,17 @@ export async function POST(req: Request): Promise<Response> {
             { status: 400 },
           );
         }
-        if (isImageMediaType(mt)) {
-          blocks.push({
-            type: "image",
-            source: { type: "base64", media_type: mt, data: att.data },
-          });
-        } else {
-          blocks.push({
-            type: "document",
-            source: { type: "base64", media_type: PDF_TYPE, data: att.data },
-          });
-        }
-      } else {
-        continue;
+        attachments.push({
+          kind: "inline",
+          name,
+          mediaType: att.mediaType,
+          data: att.data,
+        });
       }
     }
 
-    if (text.length > 0) blocks.push({ type: "text", text });
-    if (blocks.length === 0) continue;
-
-    built.push({ role: "user", content: blocks });
+    if (text.length === 0 && attachments.length === 0) continue;
+    built.push({ role: "user", text, attachments });
   }
 
   if (built.length === 0) {
@@ -248,14 +220,15 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // 7) Claude 스트림을 클라이언트로 흘려보내며, 동시에 전체 텍스트를 누적해
-  //    스트림 종료 시 assistant 메시지를 저장한다.
+  // 7) provider 선택 후 스트림. 동시에 전체 텍스트를 누적해 종료 시 assistant 저장.
+  const streamFn = modelDef.provider === "openai" ? streamOpenAI : streamClaude;
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let full = "";
       try {
-        for await (const chunk of streamClaude({
+        for await (const chunk of streamFn({
           model,
           system: SYSTEM_PROMPT,
           messages: recent,

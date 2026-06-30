@@ -1,4 +1,6 @@
 import Anthropic, { toFile } from "@anthropic-ai/sdk";
+import { PDF_TYPE, isImageMediaType } from "@/lib/attachments";
+import type { NeutralMessage } from "./types";
 
 // Files API는 베타라 messages 호출에도 동일 베타 헤더가 필요하다.
 const FILES_BETA = "files-api-2025-04-14";
@@ -6,33 +8,55 @@ const FILES_BETA = "files-api-2025-04-14";
 export interface StreamOptions {
   model: string;
   system: string;
-  /** Anthropic 형식의 메시지. content는 문자열 또는 블록 배열(텍스트+이미지+문서). */
-  messages: Anthropic.Beta.BetaMessageParam[];
+  messages: NeutralMessage[];
   maxTokens: number;
 }
 
-// API 키는 서버에서만 읽는다. 클라이언트 번들에 절대 포함되지 않도록
-// NEXT_PUBLIC_ 접두사가 없는 환경변수를 사용한다.
 let client: Anthropic | null = null;
 
 function getClient(): Anthropic {
   if (client) return client;
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error(
       "ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다. .env.local 에 키를 추가하세요.",
     );
   }
-
   client = new Anthropic({ apiKey });
   return client;
 }
 
-/**
- * Claude를 호출해 응답 텍스트를 델타 단위로 흘려보낸다.
- * file_id 참조(Files API)를 쓰므로 beta messages 엔드포인트를 사용한다.
- */
+// 중립 메시지 → Anthropic content 블록
+function toAnthropicMessage(m: NeutralMessage): Anthropic.Beta.BetaMessageParam {
+  if (m.role === "assistant") return { role: "assistant", content: m.text };
+
+  const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
+  for (const a of m.attachments) {
+    if (a.kind === "file" && a.fileId) {
+      blocks.push(
+        isImageMediaType(a.mediaType)
+          ? { type: "image", source: { type: "file", file_id: a.fileId } }
+          : { type: "document", source: { type: "file", file_id: a.fileId } },
+      );
+    } else if (a.kind === "inline" && a.data) {
+      if (isImageMediaType(a.mediaType)) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: a.mediaType, data: a.data },
+        });
+      } else {
+        blocks.push({
+          type: "document",
+          source: { type: "base64", media_type: PDF_TYPE, data: a.data },
+        });
+      }
+    }
+  }
+  if (m.text) blocks.push({ type: "text", text: m.text });
+  return { role: "user", content: blocks.length ? blocks : m.text };
+}
+
+/** Claude를 호출해 응답 텍스트를 델타 단위로 흘려보낸다. */
 export async function* streamClaude({
   model,
   system,
@@ -40,12 +64,11 @@ export async function* streamClaude({
   maxTokens,
 }: StreamOptions): AsyncGenerator<string> {
   const anthropic = getClient();
-
   const stream = anthropic.beta.messages.stream({
     model,
     max_tokens: maxTokens,
     system,
-    messages,
+    messages: messages.map(toAnthropicMessage),
     betas: [FILES_BETA],
   });
 
