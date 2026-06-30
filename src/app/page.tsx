@@ -507,7 +507,12 @@ export default function Home() {
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-foreground text-sm font-bold text-background">
             UZ
           </span>
-          <h1 className="text-base font-semibold tracking-tight">UZ Chat</h1>
+          <h1 className="text-base font-semibold tracking-tight">
+            UZ Chat
+            <span className="ml-1 font-normal text-zinc-500 dark:text-zinc-400">
+              : 우찌 전용
+            </span>
+          </h1>
         </header>
 
         {/* 메시지 영역 */}
