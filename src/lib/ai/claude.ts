@@ -1,15 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-/** 채팅 메시지 한 건. role/content 만 사용하는 최소 형태. */
-export interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
 export interface StreamOptions {
   model: string;
   system: string;
-  messages: ChatMessage[];
+  /** Anthropic 형식의 메시지. content는 문자열 또는 블록 배열(텍스트+이미지+문서). */
+  messages: Anthropic.MessageParam[];
   maxTokens: number;
 }
 
