@@ -62,6 +62,8 @@ export default function Home() {
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -173,6 +175,18 @@ export default function Home() {
         setActiveConversationId(null);
         setMessages([]);
       }
+    }
+  }
+
+  // 휴지통 버튼은 즉시 삭제하지 않고 확인 모달을 띄운다 (실수 방지)
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await deleteConversation(deleteTarget.id);
+    } finally {
+      setDeleting(false);
+      setDeleteTarget(null);
     }
   }
 
@@ -463,7 +477,7 @@ export default function Home() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => deleteConversation(c.id)}
+                      onClick={() => setDeleteTarget(c)}
                       aria-label="대화 삭제"
                       title="삭제"
                       className="mr-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-black/[.06] hover:text-red-500 group-hover:flex dark:hover:bg-white/[.1]"
@@ -630,6 +644,45 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* 삭제 확인 모달 */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => {
+            if (!deleting) setDeleteTarget(null);
+          }}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-black/[.08] bg-background p-5 shadow-xl dark:border-white/[.12]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-base font-semibold">대화를 삭제할까요?</h2>
+            <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+              <b className="break-words text-foreground">{deleteTarget.title}</b>
+              <br />이 대화의 모든 메시지가 영구 삭제되며 되돌릴 수 없습니다.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                className="rounded-lg border border-black/[.1] px-4 py-2 text-sm transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                {deleting ? "삭제 중…" : "삭제"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
