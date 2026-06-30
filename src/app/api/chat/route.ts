@@ -24,7 +24,7 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 4096;
 
 // 비용 보호
-const MAX_MESSAGES = 20; // Claude로 보내는 최근 메시지 개수 (이미지/PDF 포함)
+const DEFAULT_HISTORY_LIMIT = 20; // settings 조회 실패 시 fallback (최근 N개 전송)
 const MAX_INPUT_CHARS = 8000; // 마지막 메시지 텍스트 최대 길이
 
 const SYSTEM_PROMPT = `당신은 친절하고 똑똑한 한국어 AI 어시스턴트입니다.
@@ -43,6 +43,26 @@ function getSupabaseSafe() {
     return getSupabase();
   } catch {
     return null;
+  }
+}
+
+// settings.message_history_limit 를 읽어 "최근 N개" 한계로 사용. 실패 시 기본값.
+async function getHistoryLimit(
+  supabase: ReturnType<typeof getSupabaseSafe>,
+): Promise<number> {
+  if (!supabase) return DEFAULT_HISTORY_LIMIT;
+  try {
+    const { data } = await supabase
+      .from("settings")
+      .select("message_history_limit")
+      .eq("id", 1)
+      .single();
+    const n = data?.message_history_limit;
+    return typeof n === "number" && Number.isInteger(n) && n > 0
+      ? n
+      : DEFAULT_HISTORY_LIMIT;
+  } catch {
+    return DEFAULT_HISTORY_LIMIT;
   }
 }
 
@@ -204,11 +224,12 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // 5) 비용 보호: 최근 MAX_MESSAGES개만 전송
-  const recent = built.slice(-MAX_MESSAGES);
+  // 5) 비용 보호: 최근 N개만 전송 (N은 settings에서 읽고, 실패 시 기본 20)
+  const supabase = getSupabaseSafe();
+  const historyLimit = await getHistoryLimit(supabase);
+  const recent = built.slice(-historyLimit);
 
   // 6) (부수 처리) 새 user 메시지를 DB에 저장 — base64는 저장하지 않고 메타만.
-  const supabase = conversationId ? getSupabaseSafe() : null;
   const nowIso = () => new Date().toISOString();
   if (supabase && conversationId && lastRaw?.role === "user") {
     try {
