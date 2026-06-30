@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { streamClaude } from "@/lib/ai/claude";
+import { getSupabase } from "@/lib/supabaseServer";
 import {
   INLINE_MAX_BYTES,
   PDF_TYPE,
@@ -9,7 +10,6 @@ import {
 
 // ─────────────────────────────────────────────────────────────
 // 허용 모델 — 클라이언트가 임의 모델을 주입하지 못하도록 화이트리스트.
-// 목록에 없는 값이 오면 기본값으로 fallback.
 //   'claude-sonnet-4-6'          — 속도/품질 균형 (기본)
 //   'claude-opus-4-8'            — 최고 품질 (느리고 비쌈)
 //   'claude-haiku-4-5-20251001'  — 저렴하고 빠름
@@ -37,10 +37,36 @@ const SYSTEM_PROMPT = `당신은 친절하고 똑똑한 한국어 AI 어시스�
 // Vercel 서버리스 함수 시간 초과 대비 (초 단위)
 export const maxDuration = 60;
 
+// Supabase 미설정이어도 채팅은 동작하도록 (저장만 건너뜀)
+function getSupabaseSafe() {
+  try {
+    return getSupabase();
+  } catch {
+    return null;
+  }
+}
+
 // base64 문자열의 대략적인 디코딩 바이트 수
 function approxBytesFromBase64(b64: string): number {
   const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
   return Math.floor((b64.length * 3) / 4) - padding;
+}
+
+// 첨부에서 DB 저장용 메타데이터만 추출 (base64 데이터는 저장하지 않음)
+function attachmentMeta(
+  attachments: unknown,
+): { name: string; type: string }[] | null {
+  if (!Array.isArray(attachments)) return null;
+  const meta = attachments
+    .filter(
+      (a): a is { name: string; mediaType: string } =>
+        !!a &&
+        typeof a === "object" &&
+        typeof (a as { name?: unknown }).name === "string" &&
+        typeof (a as { mediaType?: unknown }).mediaType === "string",
+    )
+    .map((a) => ({ name: a.name, type: a.mediaType }));
+  return meta.length ? meta : null;
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -52,7 +78,9 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: "잘못된 JSON 요청입니다." }, { status: 400 });
   }
 
-  const root = body as { messages?: unknown; model?: unknown } | null;
+  const root = body as
+    | { messages?: unknown; model?: unknown; conversationId?: unknown }
+    | null;
   const messages = root?.messages;
   if (!Array.isArray(messages)) {
     return Response.json(
@@ -60,6 +88,11 @@ export async function POST(req: Request): Promise<Response> {
       { status: 400 },
     );
   }
+
+  const conversationId =
+    typeof root?.conversationId === "string" && root.conversationId
+      ? root.conversationId
+      : null;
 
   // 2) 모델 검증: 허용 목록에 없으면 기본값으로 fallback (임의 모델 주입 방지)
   const requested = root?.model;
@@ -70,7 +103,9 @@ export async function POST(req: Request): Promise<Response> {
       : DEFAULT_MODEL;
 
   // 3) 마지막 메시지 텍스트 길이 제한
-  const lastRaw = messages[messages.length - 1] as { content?: unknown } | undefined;
+  const lastRaw = messages[messages.length - 1] as
+    | { role?: unknown; content?: unknown; attachments?: unknown }
+    | undefined;
   const lastText = typeof lastRaw?.content === "string" ? lastRaw.content : "";
   if (lastText.length > MAX_INPUT_CHARS) {
     return Response.json(
@@ -80,9 +115,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 4) 메시지 → Anthropic content 블록으로 변환
-  //    첨부는 두 가지 형태:
-  //      - kind:"inline" → base64 (작은 파일)
-  //      - kind:"file"   → Files API의 file_id (큰 파일, Blob 경유 업로드 완료)
+  //    첨부: kind:"inline"(base64, 작은 파일) / kind:"file"(Files API file_id, 큰 파일)
   const built: Anthropic.Beta.BetaMessageParam[] = [];
   for (const raw of messages) {
     if (!raw || typeof raw !== "object") continue;
@@ -91,14 +124,12 @@ export async function POST(req: Request): Promise<Response> {
 
     const text = typeof m.content === "string" ? m.content : "";
 
-    // 어시스턴트 메시지는 항상 텍스트만
     if (m.role === "assistant") {
       if (text.length === 0) continue;
       built.push({ role: "assistant", content: text });
       continue;
     }
 
-    // 사용자 메시지: 파일 블록 + 텍스트 블록
     const blocks: Anthropic.Beta.BetaContentBlockParam[] = [];
     const attachments = Array.isArray(m.attachments) ? m.attachments : [];
 
@@ -110,29 +141,24 @@ export async function POST(req: Request): Promise<Response> {
         data?: unknown;
         fileId?: unknown;
       };
-      if (typeof att.mediaType !== "string" || !isAllowedType(att.mediaType)) {
+      if (typeof att.mediaType !== "string") continue;
+      // 복원된 메시지의 메타데이터 전용 첨부(데이터 없음)는 건너뜀
+      if (att.kind !== "file" && att.kind !== "inline") continue;
+      if (!isAllowedType(att.mediaType)) {
         return Response.json(
-          { error: `지원하지 않는 첨부 형식입니다: ${String(att.mediaType)}` },
+          { error: `지원하지 않는 첨부 형식입니다: ${att.mediaType}` },
           { status: 400 },
         );
       }
       const mt = att.mediaType;
 
       if (att.kind === "file" && typeof att.fileId === "string") {
-        // Files API 참조
         if (isImageMediaType(mt)) {
-          blocks.push({
-            type: "image",
-            source: { type: "file", file_id: att.fileId },
-          });
+          blocks.push({ type: "image", source: { type: "file", file_id: att.fileId } });
         } else {
-          blocks.push({
-            type: "document",
-            source: { type: "file", file_id: att.fileId },
-          });
+          blocks.push({ type: "document", source: { type: "file", file_id: att.fileId } });
         }
       } else if (att.kind === "inline" && typeof att.data === "string") {
-        // base64 인라인
         if (approxBytesFromBase64(att.data) > INLINE_MAX_BYTES) {
           return Response.json(
             { error: "인라인 첨부가 너무 큽니다." },
@@ -171,10 +197,32 @@ export async function POST(req: Request): Promise<Response> {
   // 5) 비용 보호: 최근 MAX_MESSAGES개만 전송
   const recent = built.slice(-MAX_MESSAGES);
 
-  // 6) Claude 스트림을 ReadableStream으로 브라우저에 흘려보낸다
+  // 6) (부수 처리) 새 user 메시지를 DB에 저장 — base64는 저장하지 않고 메타만.
+  const supabase = conversationId ? getSupabaseSafe() : null;
+  const nowIso = () => new Date().toISOString();
+  if (supabase && conversationId && lastRaw?.role === "user") {
+    try {
+      await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        role: "user",
+        content: lastText,
+        attachments: attachmentMeta(lastRaw.attachments),
+      });
+      await supabase
+        .from("conversations")
+        .update({ updated_at: nowIso() })
+        .eq("id", conversationId);
+    } catch (err) {
+      console.error("[api/chat] user message save error:", err);
+    }
+  }
+
+  // 7) Claude 스트림을 클라이언트로 흘려보내며, 동시에 전체 텍스트를 누적해
+  //    스트림 종료 시 assistant 메시지를 저장한다.
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let full = "";
       try {
         for await (const chunk of streamClaude({
           model,
@@ -182,7 +230,26 @@ export async function POST(req: Request): Promise<Response> {
           messages: recent,
           maxTokens: MAX_TOKENS,
         })) {
+          full += chunk;
           controller.enqueue(encoder.encode(chunk));
+        }
+
+        if (supabase && conversationId && full.trim()) {
+          try {
+            await supabase.from("messages").insert({
+              conversation_id: conversationId,
+              role: "assistant",
+              content: full,
+              model,
+              attachments: null,
+            });
+            await supabase
+              .from("conversations")
+              .update({ updated_at: nowIso() })
+              .eq("id", conversationId);
+          } catch (err) {
+            console.error("[api/chat] assistant message save error:", err);
+          }
         }
       } catch (err) {
         console.error("[api/chat] streaming error:", err);

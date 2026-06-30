@@ -16,6 +16,8 @@ const MODELS = [
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (빠름/저렴)" },
 ] as const;
 
+type Conversation = { id: string; title: string; updated_at: string };
+
 type UIAttachment = {
   id: string;
   name: string;
@@ -47,6 +49,11 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export default function Home() {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(
+    null,
+  );
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -54,11 +61,24 @@ export default function Home() {
   const [pending, setPending] = useState<UIAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+
+  // 첫 로드: 대화 목록을 불러와 가장 최근 대화를 자동 선택
+  useEffect(() => {
+    (async () => {
+      const list = await refreshConversations();
+      if (list.length > 0) {
+        setActiveConversationId(list[0].id);
+        void loadMessages(list[0].id);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -71,6 +91,92 @@ export default function Home() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [input]);
 
+  // ── 대화 목록/메시지 ──────────────────────────
+  async function refreshConversations(): Promise<Conversation[]> {
+    try {
+      const res = await fetch("/api/conversations");
+      if (!res.ok) return [];
+      const list = (await res.json()) as Conversation[];
+      setConversations(list);
+      return list;
+    } catch {
+      return [];
+    }
+  }
+
+  async function loadMessages(conversationId: string) {
+    try {
+      const res = await fetch(
+        `/api/messages?conversationId=${encodeURIComponent(conversationId)}`,
+      );
+      if (!res.ok) {
+        setMessages([]);
+        return;
+      }
+      const rows = (await res.json()) as {
+        role: "user" | "assistant";
+        content: string;
+        attachments: { name: string; type: string }[] | null;
+      }[];
+      setMessages(
+        rows.map((r) => ({
+          role: r.role,
+          content: r.content,
+          attachments: Array.isArray(r.attachments)
+            ? r.attachments.map((a) => ({
+                id: crypto.randomUUID(),
+                name: a.name,
+                mediaType: a.type,
+                size: 0,
+              }))
+            : undefined,
+        })),
+      );
+    } catch {
+      setMessages([]);
+    }
+  }
+
+  function newConversation() {
+    setActiveConversationId(null);
+    setMessages([]);
+    setPending([]);
+    setInput("");
+    setAttachError(null);
+    setSidebarOpen(false);
+  }
+
+  function selectConversation(id: string) {
+    setSidebarOpen(false);
+    if (id === activeConversationId) return;
+    setActiveConversationId(id);
+    setPending([]);
+    setInput("");
+    setAttachError(null);
+    void loadMessages(id);
+  }
+
+  async function deleteConversation(id: string) {
+    try {
+      await fetch(`/api/conversations?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+    } catch {
+      /* noop */
+    }
+    const list = await refreshConversations();
+    if (id === activeConversationId) {
+      if (list.length > 0) {
+        setActiveConversationId(list[0].id);
+        void loadMessages(list[0].id);
+      } else {
+        setActiveConversationId(null);
+        setMessages([]);
+      }
+    }
+  }
+
+  // ── 첨부 ──────────────────────────────────────
   async function addFiles(list: FileList | File[]) {
     const files = Array.from(list);
 
@@ -90,7 +196,6 @@ export default function Home() {
         : undefined;
 
       if (file.size <= INLINE_MAX_BYTES) {
-        // 작은 파일: base64 인라인
         try {
           const data = await fileToBase64(file);
           setPending((prev) => [
@@ -103,7 +208,6 @@ export default function Home() {
           setAttachError(`파일을 읽지 못했습니다: ${file.name}`);
         }
       } else {
-        // 큰 파일: Blob 직접 업로드 → Files API로 변환 (file_id)
         setPending((prev) => [
           ...prev,
           { id, name: file.name, mediaType: file.type, size: file.size, previewUrl, uploading: true },
@@ -156,10 +260,31 @@ export default function Home() {
     });
   }
 
+  // ── 전송 ──────────────────────────────────────
   async function send() {
     const text = input.trim();
     const uploading = pending.some((p) => p.uploading);
     if ((text === "" && pending.length === 0) || loading || uploading) return;
+
+    // 1) 대화 확보 — 없으면 새로 생성 (실패해도 채팅은 진행, 저장만 생략)
+    let convId = activeConversationId;
+    if (!convId) {
+      try {
+        const res = await fetch("/api/conversations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ firstMessage: text }),
+        });
+        if (res.ok) {
+          const conv = (await res.json()) as { id: string };
+          convId = conv.id;
+          setActiveConversationId(convId);
+          void refreshConversations();
+        }
+      } catch {
+        /* Supabase 미설정 등 — 저장 없이 진행 */
+      }
+    }
 
     const userMsg: Message = {
       role: "user",
@@ -181,14 +306,18 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
+          conversationId: convId,
           messages: nextMessages.map((m) => ({
             role: m.role,
             content: m.content,
-            attachments: m.attachments?.map((a) =>
-              a.fileId
-                ? { kind: "file", name: a.name, mediaType: a.mediaType, fileId: a.fileId }
-                : { kind: "inline", name: a.name, mediaType: a.mediaType, data: a.data },
-            ),
+            // 데이터가 있는 첨부만 전송 (복원된 메타데이터 전용 첨부는 제외)
+            attachments: m.attachments
+              ?.filter((a) => a.data || a.fileId)
+              .map((a) =>
+                a.fileId
+                  ? { kind: "file", name: a.name, mediaType: a.mediaType, fileId: a.fileId }
+                  : { kind: "inline", name: a.name, mediaType: a.mediaType, data: a.data },
+              ),
           })),
         }),
       });
@@ -234,6 +363,7 @@ export default function Home() {
       });
     } finally {
       setLoading(false);
+      void refreshConversations(); // 새 대화/제목/순서 반영
     }
   }
 
@@ -279,153 +409,227 @@ export default function Home() {
     !loading && !uploading && (input.trim() !== "" || pending.length > 0);
 
   return (
-    <div
-      className="relative flex flex-1 flex-col font-sans"
-      onDragEnter={onDragEnter}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
-      {/* 헤더 */}
-      <header className="border-b border-black/[.08] px-4 py-3 dark:border-white/[.12]">
-        <div className="mx-auto flex max-w-3xl items-center gap-2">
+    <div className="flex flex-1 overflow-hidden">
+      {/* 모바일 백드롭 */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-10 bg-black/30 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* 사이드바 */}
+      <aside
+        className={[
+          "fixed inset-y-0 left-0 z-20 flex w-64 transform flex-col border-r border-black/[.08] bg-background transition-transform md:static md:z-auto md:translate-x-0 dark:border-white/[.12]",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full",
+        ].join(" ")}
+      >
+        <div className="p-3">
+          <button
+            type="button"
+            onClick={newConversation}
+            className="w-full rounded-lg border border-black/[.1] px-3 py-2 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.15] dark:hover:bg-white/[.06]"
+          >
+            + 새 대화
+          </button>
+        </div>
+        <nav className="flex-1 overflow-y-auto px-2 pb-3">
+          {conversations.length === 0 ? (
+            <p className="px-2 py-4 text-center text-xs text-zinc-400">
+              대화가 없습니다
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-0.5">
+              {conversations.map((c) => {
+                const active = c.id === activeConversationId;
+                return (
+                  <li
+                    key={c.id}
+                    className={[
+                      "group flex items-center rounded-lg",
+                      active
+                        ? "bg-black/[.06] dark:bg-white/[.1]"
+                        : "hover:bg-black/[.03] dark:hover:bg-white/[.05]",
+                    ].join(" ")}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => selectConversation(c.id)}
+                      className="flex-1 truncate px-3 py-2 text-left text-sm"
+                      title={c.title}
+                    >
+                      {c.title}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteConversation(c.id)}
+                      aria-label="대화 삭제"
+                      title="삭제"
+                      className="mr-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-black/[.06] hover:text-red-500 group-hover:flex dark:hover:bg-white/[.1]"
+                    >
+                      🗑
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </nav>
+      </aside>
+
+      {/* 채팅 영역 */}
+      <div
+        className="relative flex flex-1 flex-col font-sans"
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {/* 헤더 */}
+        <header className="flex items-center gap-2 border-b border-black/[.08] px-4 py-3 dark:border-white/[.12]">
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((v) => !v)}
+            aria-label="대화 목록"
+            className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-black/[.06] md:hidden dark:hover:bg-white/[.1]"
+          >
+            ☰
+          </button>
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-foreground text-sm font-bold text-background">
             UZ
           </span>
           <h1 className="text-base font-semibold tracking-tight">UZ Chat</h1>
-        </div>
-      </header>
+        </header>
 
-      {/* 메시지 영역 */}
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
-          {isEmpty && (
-            <div className="mt-24 text-center text-zinc-500 dark:text-zinc-400">
-              <p className="text-lg font-medium">무엇이든 물어보세요</p>
-              <p className="mt-1 text-sm">
-                Claude 기반 한국어 어시스턴트입니다. 이미지·PDF를 끌어다 놓아 보세요.
-              </p>
-            </div>
-          )}
-
-          {messages.map((m, i) => (
-            <MessageBubble key={i} message={m} />
-          ))}
-
-          {loading &&
-            messages.length > 0 &&
-            messages[messages.length - 1].role === "assistant" &&
-            messages[messages.length - 1].content === "" && (
-              <div className="flex justify-start">
-                <div className="rounded-2xl bg-black/[.04] px-4 py-3 dark:bg-white/[.06]">
-                  <TypingDots />
-                </div>
+        {/* 메시지 영역 */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
+            {isEmpty && (
+              <div className="mt-24 text-center text-zinc-500 dark:text-zinc-400">
+                <p className="text-lg font-medium">무엇이든 물어보세요</p>
+                <p className="mt-1 text-sm">
+                  Claude 기반 한국어 어시스턴트입니다. 이미지·PDF를 끌어다 놓아 보세요.
+                </p>
               </div>
             )}
 
-          <div ref={bottomRef} />
-        </div>
-      </main>
+            {messages.map((m, i) => (
+              <MessageBubble key={i} message={m} />
+            ))}
 
-      {/* 입력 영역 */}
-      <footer className="border-t border-black/[.08] px-4 py-3 dark:border-white/[.12]">
-        <div className="mx-auto max-w-3xl">
-          {/* 모델 선택 + 첨부 오류 */}
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-              모델
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
-              >
-                {MODELS.map((m) => (
-                  <option key={m.id} value={m.id} className="text-black">
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {attachError && (
-              <span className="truncate text-xs text-red-500">{attachError}</span>
-            )}
-          </div>
-
-          {/* 첨부 미리보기 */}
-          {pending.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {pending.map((a) => (
-                <div key={a.id} className="relative">
-                  <AttachmentPreview att={a} />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a.id)}
-                    aria-label="첨부 제거"
-                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-xs text-white shadow hover:bg-zinc-700 dark:bg-zinc-200 dark:text-black"
-                  >
-                    ×
-                  </button>
+            {loading &&
+              messages.length > 0 &&
+              messages[messages.length - 1].role === "assistant" &&
+              messages[messages.length - 1].content === "" && (
+                <div className="flex justify-start">
+                  <div className="rounded-2xl bg-black/[.04] px-4 py-3 dark:bg-white/[.06]">
+                    <TypingDots />
+                  </div>
                 </div>
-              ))}
+              )}
+
+            <div ref={bottomRef} />
+          </div>
+        </main>
+
+        {/* 입력 영역 */}
+        <footer className="border-t border-black/[.08] px-4 py-3 dark:border-white/[.12]">
+          <div className="mx-auto max-w-3xl">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                모델
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
+                >
+                  {MODELS.map((m) => (
+                    <option key={m.id} value={m.id} className="text-black">
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {attachError && (
+                <span className="truncate text-xs text-red-500">{attachError}</span>
+              )}
             </div>
-          )}
 
-          {/* 입력 줄 */}
-          <div className="flex items-end gap-2">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={loading}
-              aria-label="파일 첨부"
-              title="파일 첨부 (이미지·PDF)"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-black/[.1] text-lg transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]"
-            >
-              📎
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept={ACCEPT}
-              multiple
-              hidden
-              onChange={(e) => {
-                if (e.target.files) void addFiles(e.target.files);
-                e.target.value = "";
-              }}
-            />
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              disabled={loading}
-              rows={1}
-              placeholder="메시지를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"
-              className="max-h-[200px] flex-1 resize-none rounded-2xl border border-black/[.1] bg-transparent px-4 py-3 text-[15px] leading-6 outline-none placeholder:text-zinc-400 focus:border-black/30 disabled:opacity-60 dark:border-white/[.15] dark:focus:border-white/40"
-            />
-            <button
-              type="button"
-              onClick={() => void send()}
-              disabled={!canSend}
-              className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
-            >
-              {uploading ? "업로드 중" : "전송"}
-            </button>
-          </div>
-        </div>
-      </footer>
+            {pending.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {pending.map((a) => (
+                  <div key={a.id} className="relative">
+                    <AttachmentPreview att={a} />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(a.id)}
+                      aria-label="첨부 제거"
+                      className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-xs text-white shadow hover:bg-zinc-700 dark:bg-zinc-200 dark:text-black"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
-      {/* 드롭 오버레이 */}
-      {dragActive && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-foreground/5 backdrop-blur-sm">
-          <div className="rounded-2xl border-2 border-dashed border-foreground/40 bg-background px-8 py-6 text-center">
-            <p className="text-lg font-medium">여기에 파일을 놓으세요</p>
-            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-              이미지(PNG·JPG·WebP·GIF) 또는 PDF · 파일당 최대 32MB
-            </p>
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading}
+                aria-label="파일 첨부"
+                title="파일 첨부 (이미지·PDF)"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-black/[.1] text-lg transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]"
+              >
+                📎
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT}
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) void addFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                disabled={loading}
+                rows={1}
+                placeholder="메시지를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"
+                className="max-h-[200px] flex-1 resize-none rounded-2xl border border-black/[.1] bg-transparent px-4 py-3 text-[15px] leading-6 outline-none placeholder:text-zinc-400 focus:border-black/30 disabled:opacity-60 dark:border-white/[.15] dark:focus:border-white/40"
+              />
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={!canSend}
+                className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                {uploading ? "업로드 중" : "전송"}
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        </footer>
+
+        {/* 드롭 오버레이 */}
+        {dragActive && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-foreground/5 backdrop-blur-sm">
+            <div className="rounded-2xl border-2 border-dashed border-foreground/40 bg-background px-8 py-6 text-center">
+              <p className="text-lg font-medium">여기에 파일을 놓으세요</p>
+              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                이미지(PNG·JPG·WebP·GIF) 또는 PDF · 파일당 최대 32MB
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -462,10 +666,12 @@ function MessageBubble({ message }: { message: Message }) {
 
 function AttachmentPreview({ att }: { att: UIAttachment }) {
   const isImage = att.mediaType.startsWith("image/");
+  const isPdf = att.mediaType === "application/pdf";
   const src =
     att.previewUrl ??
     (att.data ? `data:${att.mediaType};base64,${att.data}` : undefined);
 
+  // 이미지이고 미리보기 소스가 있으면 썸네일
   if (isImage && src) {
     return (
       <div className="relative">
@@ -480,9 +686,10 @@ function AttachmentPreview({ att }: { att: UIAttachment }) {
     );
   }
 
+  // 그 외(복원된 첨부 포함): 파일 칩
   return (
     <div className="relative flex h-20 w-32 flex-col justify-center gap-1 rounded-lg border border-black/[.1] bg-background px-3 dark:border-white/[.15]">
-      <span className="text-xl">📄</span>
+      <span className="text-xl">{isPdf ? "📄" : "📎"}</span>
       <span className="truncate text-xs text-zinc-600 dark:text-zinc-300">
         {att.name}
       </span>
