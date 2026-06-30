@@ -1,0 +1,33 @@
+# Render Blueprint — Next.js를 일반 Node 서버로 실행
+# (Vercel 서버리스의 ~60초 함수 시간 제한이 없음 → 긴 답변도 안 끊김)
+#
+# 사용법: Render 대시보드 → New → Blueprint → 이 GitHub 저장소 연결
+#         → 아래 sync:false 환경변수들을 입력 → Apply → 배포
+services:
+  - type: web
+    name: uz-chat
+    runtime: node
+    plan: free
+    region: singapore # 한국에서 가까운 리전
+    buildCommand: npm install && npm run build
+    startCommand: npm run start # next start 는 PORT 환경변수를 자동 인식
+    healthCheckPath: /
+    autoDeploy: true # main 브랜치 push 시 자동 재배포 (Vercel과 동일)
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # ↓ 값은 Render 대시보드에서 직접 입력 (절대 저장소에 커밋하지 않음)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: BLOB_READ_WRITE_TOKEN # 큰 파일 첨부 쓸 때만 (없으면 비워둬도 됨)
+        sync: false
+      - key: CRON_SECRET # 정기 정리용 (Render에선 별도 Cron 필요 — 아래 설명)
+        sync: false
