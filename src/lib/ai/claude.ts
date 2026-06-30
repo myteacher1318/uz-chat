@@ -32,9 +32,6 @@ function getClient(): Anthropic {
 /**
  * Claude를 호출해 응답 텍스트를 델타 단위로 흘려보낸다.
  * file_id 참조(Files API)를 쓰므로 beta messages 엔드포인트를 사용한다.
- *
- * 나중에 OpenAI 등 다른 provider를 추가할 때는 동일한 시그니처의
- * `streamOpenAI` 같은 함수를 옆에 만들고 호출부에서 분기하면 된다.
  */
 export async function* streamClaude({
   model,
@@ -78,4 +75,22 @@ export async function uploadToAnthropicFiles(
     betas: [FILES_BETA],
   });
   return uploaded.id;
+}
+
+/** Anthropic Files API에 올라간 파일 1개 삭제 (대화 삭제 시 정리용). */
+export async function deleteAnthropicFile(fileId: string): Promise<void> {
+  const anthropic = getClient();
+  await anthropic.beta.files.delete(fileId, { betas: [FILES_BETA] });
+}
+
+/** Anthropic Files API의 전체 파일 목록(id, 생성시각). 정기 정리용. */
+export async function listAnthropicFiles(): Promise<
+  { id: string; createdAt: string }[]
+> {
+  const anthropic = getClient();
+  const result: { id: string; createdAt: string }[] = [];
+  for await (const f of anthropic.beta.files.list({ betas: [FILES_BETA] })) {
+    result.push({ id: f.id, createdAt: f.created_at });
+  }
+  return result;
 }

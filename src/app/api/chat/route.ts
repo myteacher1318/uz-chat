@@ -52,20 +52,30 @@ function approxBytesFromBase64(b64: string): number {
   return Math.floor((b64.length * 3) / 4) - padding;
 }
 
-// 첨부에서 DB 저장용 메타데이터만 추출 (base64 데이터는 저장하지 않음)
+// 첨부에서 DB 저장용 메타데이터만 추출 (base64 데이터는 저장하지 않음).
+// Files API 첨부는 file_id도 함께 저장한다 — 대화 삭제 시 Anthropic 파일 정리용.
 function attachmentMeta(
   attachments: unknown,
-): { name: string; type: string }[] | null {
+): { name: string; type: string; fileId?: string }[] | null {
   if (!Array.isArray(attachments)) return null;
   const meta = attachments
     .filter(
-      (a): a is { name: string; mediaType: string } =>
+      (
+        a,
+      ): a is { name: string; mediaType: string; kind?: string; fileId?: string } =>
         !!a &&
         typeof a === "object" &&
         typeof (a as { name?: unknown }).name === "string" &&
         typeof (a as { mediaType?: unknown }).mediaType === "string",
     )
-    .map((a) => ({ name: a.name, type: a.mediaType }));
+    .map((a) => {
+      const o: { name: string; type: string; fileId?: string } = {
+        name: a.name,
+        type: a.mediaType,
+      };
+      if (a.kind === "file" && typeof a.fileId === "string") o.fileId = a.fileId;
+      return o;
+    });
   return meta.length ? meta : null;
 }
 
