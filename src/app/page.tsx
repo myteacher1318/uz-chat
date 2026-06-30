@@ -688,9 +688,22 @@ export default function Home() {
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* 클립보드 사용 불가(비보안 컨텍스트 등) — 무시 */
+    }
+  }
+
+  const showCopy = message.content !== "" && !message.error;
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
         className={[
           "max-w-[85%] rounded-2xl px-4 py-3 text-[15px] leading-7",
@@ -712,6 +725,16 @@ function MessageBubble({ message }: { message: Message }) {
           <div className="whitespace-pre-wrap">{message.content}</div>
         )}
       </div>
+      {showCopy && (
+        <button
+          type="button"
+          onClick={copy}
+          aria-label="메시지 복사"
+          className="mt-1 px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+        >
+          {copied ? "복사됨 ✓" : "📋 복사"}
+        </button>
+      )}
     </div>
   );
 }
