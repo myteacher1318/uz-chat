@@ -5,8 +5,6 @@ import { getSupabase } from "@/lib/supabaseServer";
 import { INLINE_MAX_BYTES, isAllowedType } from "@/lib/attachments";
 import type { NeutralAttachment, NeutralMessage } from "@/lib/ai/types";
 
-const MAX_TOKENS = 8192; // 추론 모델(GPT-5.x 등)은 reasoning 토큰도 여기서 소모하므로 여유를 둔다
-
 // 비용 보호
 const DEFAULT_HISTORY_LIMIT = 20; // settings 조회 실패 시 fallback (최근 N개 전송)
 const MAX_INPUT_CHARS = 8000; // 마지막 메시지 텍스트 최대 길이
@@ -232,7 +230,7 @@ export async function POST(req: Request): Promise<Response> {
           model,
           system: SYSTEM_PROMPT,
           messages: recent,
-          maxTokens: MAX_TOKENS,
+          maxTokens: modelDef.maxTokens,
         })) {
           full += chunk;
           controller.enqueue(encoder.encode(chunk));
