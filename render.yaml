@@ -27,6 +27,8 @@ services:
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
+      - key: ACCESS_CODE # 대문 접속 코드(8자리 숫자) — 미설정 시 게이트 꺼짐
+        sync: false
       - key: BLOB_READ_WRITE_TOKEN # 큰 파일 첨부 쓸 때만 (없으면 비워둬도 됨)
         sync: false
       - key: CRON_SECRET # 정기 정리용 (Render에선 별도 Cron 필요 — 아래 설명)
