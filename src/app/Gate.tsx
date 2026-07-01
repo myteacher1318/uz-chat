@@ -10,7 +10,7 @@ export default function Gate() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (loading || code.length < 8) return;
+    if (loading || code.trim().length === 0) return;
     setLoading(true);
     setErr(null);
     try {
@@ -48,21 +48,17 @@ export default function Gate() {
         </div>
         <input
           type="password"
-          inputMode="numeric"
           autoComplete="off"
-          maxLength={8}
           value={code}
-          onChange={(e) =>
-            setCode(e.target.value.replace(/\D/g, "").slice(0, 8))
-          }
-          placeholder="8자리 숫자"
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="접속 코드"
           autoFocus
-          className="w-full rounded-xl border border-black/[.1] bg-transparent px-4 py-3 text-center text-lg tracking-[0.4em] outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
+          className="w-full rounded-xl border border-black/[.1] bg-transparent px-4 py-3 text-center text-lg tracking-[0.3em] outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
         />
         {err && <p className="text-sm text-red-500">{err}</p>}
         <button
           type="submit"
-          disabled={loading || code.length < 8}
+          disabled={loading || code.trim().length === 0}
           className="w-full rounded-xl bg-foreground px-4 py-3 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           {loading ? "확인 중…" : "입장"}

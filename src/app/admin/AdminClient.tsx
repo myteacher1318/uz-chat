@@ -362,10 +362,10 @@ export default function AdminClient() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-zinc-500 dark:text-zinc-400">
-                      <th className="pb-1 text-left font-medium">IP</th>
-                      <th className="pb-1 text-right font-medium">횟수</th>
-                      <th className="pb-1 text-left font-medium">최근 접속</th>
-                      <th className="pb-1 text-left font-medium">처음 접속</th>
+                      <th className="pb-1 pr-4 text-left font-medium">IP</th>
+                      <th className="pb-1 pr-8 text-right font-medium">횟수</th>
+                      <th className="pb-1 pr-4 text-left font-medium">최근 접속</th>
+                      <th className="pb-1 pr-4 text-left font-medium">처음 접속</th>
                       <th className="pb-1 text-left font-medium">User-Agent</th>
                     </tr>
                   </thead>
@@ -375,14 +375,14 @@ export default function AdminClient() {
                         key={r.ip}
                         className="border-b border-black/[.05] last:border-0 dark:border-white/[.08]"
                       >
-                        <td className="py-1.5 font-mono text-xs">{r.ip}</td>
-                        <td className="py-1.5 text-right tabular-nums">
+                        <td className="py-1.5 pr-4 font-mono text-xs">{r.ip}</td>
+                        <td className="py-1.5 pr-8 text-right tabular-nums">
                           {nf(r.hits)}
                         </td>
-                        <td className="py-1.5 text-xs text-zinc-500">
+                        <td className="py-1.5 pr-4 text-xs text-zinc-500">
                           {formatDateTime(r.lastSeen)}
                         </td>
-                        <td className="py-1.5 text-xs text-zinc-500">
+                        <td className="py-1.5 pr-4 text-xs text-zinc-500">
                           {formatDateTime(r.firstSeen)}
                         </td>
                         <td
