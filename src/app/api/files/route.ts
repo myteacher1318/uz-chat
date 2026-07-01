@@ -1,6 +1,8 @@
 import { del } from "@vercel/blob";
 import { uploadToAnthropicFiles } from "@/lib/ai/claude";
 import { isAllowedType, MAX_FILE_BYTES } from "@/lib/attachments";
+import { getSupabase } from "@/lib/supabaseServer";
+import { bumpCounters } from "@/lib/usage";
 
 // Vercel Blob에 올라간 임시 파일을 받아 Anthropic Files API로 업로드하고
 // file_id를 돌려준다. 전송이 끝나면 임시 Blob은 삭제한다.
@@ -70,6 +72,15 @@ export async function POST(req: Request): Promise<Response> {
   try {
     const fileId = await uploadToAnthropicFiles(buf, name, mediaType);
     await del(url).catch(() => {}); // 임시 Blob 정리
+    // 첨부(대용량·Files API 저장분) 누적 용량 집계 — best-effort.
+    try {
+      void bumpCounters(getSupabase(), {
+        attachment_count: 1,
+        attachment_bytes: buf.length,
+      });
+    } catch {
+      /* Supabase 미설정 등 — 집계만 건너뜀 */
+    }
     return Response.json({ fileId });
   } catch (err) {
     await del(url).catch(() => {});

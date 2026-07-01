@@ -10,6 +10,8 @@ export interface StreamOptions {
   system: string;
   messages: NeutralMessage[];
   maxTokens: number;
+  // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
+  onUsage?: (u: { input: number; output: number }) => void;
 }
 
 let client: Anthropic | null = null;
@@ -62,6 +64,7 @@ export async function* streamClaude({
   system,
   messages,
   maxTokens,
+  onUsage,
 }: StreamOptions): AsyncGenerator<string> {
   const anthropic = getClient();
   const stream = anthropic.beta.messages.stream({
@@ -72,14 +75,25 @@ export async function* streamClaude({
     betas: [FILES_BETA],
   });
 
+  let inputTokens = 0;
+  let outputTokens = 0;
+
   for await (const event of stream) {
-    if (
+    if (event.type === "message_start") {
+      // message_start.message.usage 에 입력 토큰이 들어온다.
+      inputTokens = event.message.usage.input_tokens ?? 0;
+    } else if (
       event.type === "content_block_delta" &&
       event.delta.type === "text_delta"
     ) {
       yield event.delta.text;
+    } else if (event.type === "message_delta") {
+      // message_delta.usage.output_tokens 는 누적 출력 토큰(최종값).
+      outputTokens = event.usage.output_tokens ?? outputTokens;
     }
   }
+
+  onUsage?.({ input: inputTokens, output: outputTokens });
 }
 
 /**
@@ -106,14 +120,21 @@ export async function deleteAnthropicFile(fileId: string): Promise<void> {
   await anthropic.beta.files.delete(fileId, { betas: [FILES_BETA] });
 }
 
-/** Anthropic Files API의 전체 파일 목록(id, 생성시각). 정기 정리용. */
+/**
+ * Anthropic Files API의 전체 파일 목록(id, 생성시각, 크기).
+ * 정기 정리(cleanup)와 관리자 저장 용량 확인에 쓴다.
+ */
 export async function listAnthropicFiles(): Promise<
-  { id: string; createdAt: string }[]
+  { id: string; createdAt: string; sizeBytes: number }[]
 > {
   const anthropic = getClient();
-  const result: { id: string; createdAt: string }[] = [];
+  const result: { id: string; createdAt: string; sizeBytes: number }[] = [];
   for await (const f of anthropic.beta.files.list({ betas: [FILES_BETA] })) {
-    result.push({ id: f.id, createdAt: f.created_at });
+    result.push({
+      id: f.id,
+      createdAt: f.created_at,
+      sizeBytes: f.size_bytes ?? 0,
+    });
   }
   return result;
 }

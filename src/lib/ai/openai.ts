@@ -7,6 +7,8 @@ export interface StreamOptions {
   system: string;
   messages: NeutralMessage[];
   maxTokens: number;
+  // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
+  onUsage?: (u: { input: number; output: number }) => void;
 }
 
 let client: OpenAI | null = null;
@@ -59,6 +61,7 @@ export async function* streamOpenAI({
   system,
   messages,
   maxTokens,
+  onUsage,
 }: StreamOptions): AsyncGenerator<string> {
   const openai = getClient();
 
@@ -72,10 +75,22 @@ export async function* streamOpenAI({
     max_completion_tokens: maxTokens,
     messages: oaiMessages,
     stream: true,
+    // 마지막 청크에 usage 를 포함시켜 토큰 사용량을 받는다.
+    stream_options: { include_usage: true },
   });
+
+  let inputTokens = 0;
+  let outputTokens = 0;
 
   for await (const chunk of stream) {
     const delta = chunk.choices[0]?.delta?.content;
     if (delta) yield delta;
+    // usage 는 보통 choices 가 빈 마지막 청크에 실려 온다.
+    if (chunk.usage) {
+      inputTokens = chunk.usage.prompt_tokens ?? inputTokens;
+      outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+    }
   }
+
+  onUsage?.({ input: inputTokens, output: outputTokens });
 }

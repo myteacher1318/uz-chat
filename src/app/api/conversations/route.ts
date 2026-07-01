@@ -1,5 +1,6 @@
 import { getSupabase } from "@/lib/supabaseServer";
 import { deleteAnthropicFile } from "@/lib/ai/claude";
+import { bumpCounters, clientIp, recordAccess } from "@/lib/usage";
 
 // 메시지 행들의 attachments(jsonb)에서 Anthropic file_id를 모은다.
 function collectFileIds(rows: { attachments?: unknown }[] | null): string[] {
@@ -43,6 +44,8 @@ export async function POST(req: Request): Promise<Response> {
       .select("id, title")
       .single();
     if (error) throw error;
+    // 누적 대화 수 카운터 +1 (대화를 삭제해도 이 값은 줄지 않는다).
+    void bumpCounters(supabase, { conversations: 1 });
     return Response.json(data);
   } catch (err) {
     console.error("[conversations:POST]", err);
@@ -51,9 +54,11 @@ export async function POST(req: Request): Promise<Response> {
 }
 
 // GET /api/conversations  : 전체 목록을 updated_at 내림차순으로.
-export async function GET(): Promise<Response> {
+// 페이지 최초 로드 시 호출되므로 여기서 접속 IP도 누적 기록한다.
+export async function GET(req: Request): Promise<Response> {
   try {
     const supabase = getSupabase();
+    void recordAccess(supabase, clientIp(req), req.headers.get("user-agent"));
     const { data, error } = await supabase
       .from("conversations")
       .select("id, title, updated_at")

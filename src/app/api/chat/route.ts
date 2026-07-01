@@ -3,6 +3,12 @@ import { streamOpenAI } from "@/lib/ai/openai";
 import { resolveModel } from "@/lib/ai/models";
 import { getSupabase } from "@/lib/supabaseServer";
 import { INLINE_MAX_BYTES, isAllowedType } from "@/lib/attachments";
+import {
+  bumpCounters,
+  clientIp,
+  recordAccess,
+  recordUsageEvent,
+} from "@/lib/usage";
 import type { NeutralAttachment, NeutralMessage } from "@/lib/ai/types";
 
 // 비용 보호
@@ -199,6 +205,31 @@ export async function POST(req: Request): Promise<Response> {
   const historyLimit = await getHistoryLimit(supabase);
   const recent = built.slice(-historyLimit);
 
+  // 5.5) 사용량/접속 집계 — conversations/messages 와 분리된 누적 카운터에 기록.
+  //      (대화 저장 여부·삭제와 무관하게 남는다. 인라인 첨부 용량도 여기서 누적)
+  if (supabase && lastRaw?.role === "user") {
+    const rawAtts = Array.isArray(lastRaw.attachments) ? lastRaw.attachments : [];
+    let inlineCount = 0;
+    let inlineBytes = 0;
+    for (const a of rawAtts) {
+      if (
+        a &&
+        typeof a === "object" &&
+        (a as { kind?: unknown }).kind === "inline" &&
+        typeof (a as { data?: unknown }).data === "string"
+      ) {
+        inlineCount += 1;
+        inlineBytes += approxBytesFromBase64((a as { data: string }).data);
+      }
+    }
+    void bumpCounters(supabase, {
+      user_messages: 1,
+      attachment_count: inlineCount,
+      attachment_bytes: inlineBytes,
+    });
+    void recordAccess(supabase, clientIp(req), req.headers.get("user-agent"));
+  }
+
   // 6) (부수 처리) 새 user 메시지를 DB에 저장 — base64는 저장하지 않고 메타만.
   const nowIso = () => new Date().toISOString();
   if (supabase && conversationId && lastRaw?.role === "user") {
@@ -225,12 +256,18 @@ export async function POST(req: Request): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let full = "";
+      const usageRef: { value: { input: number; output: number } | null } = {
+        value: null,
+      };
       try {
         for await (const chunk of streamFn({
           model,
           system: SYSTEM_PROMPT,
           messages: recent,
           maxTokens: modelDef.maxTokens,
+          onUsage: (u) => {
+            usageRef.value = u;
+          },
         })) {
           full += chunk;
           controller.enqueue(encoder.encode(chunk));
@@ -252,6 +289,16 @@ export async function POST(req: Request): Promise<Response> {
           } catch (err) {
             console.error("[api/chat] assistant message save error:", err);
           }
+        }
+
+        // 응답 1건 + 토큰 사용량을 누적 원장에 기록 (삭제와 무관하게 보존).
+        if (supabase && usageRef.value) {
+          await recordUsageEvent(supabase, {
+            provider: modelDef.provider,
+            model,
+            input: usageRef.value.input,
+            output: usageRef.value.output,
+          });
         }
       } catch (err) {
         console.error("[api/chat] streaming error:", err);
