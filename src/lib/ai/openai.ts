@@ -7,6 +7,10 @@ export interface StreamOptions {
   system: string;
   messages: NeutralMessage[];
   maxTokens: number;
+  // Anthropic 전용 옵션 — OpenAI 경로에서는 무시된다 (인터페이스 호환용)
+  thinking?: boolean;
+  webSearch?: boolean;
+  cache?: boolean;
   // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
   onUsage?: (u: { input: number; output: number }) => void;
 }

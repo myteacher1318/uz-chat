@@ -1,4 +1,18 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* 마크다운 내 인라인 코드 — 배경 칩 형태 */
+.prose :not(pre) > code {
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.3rem;
+  font-weight: 500;
+}
+@media (prefers-color-scheme: dark) {
+  .prose :not(pre) > code {
+    background: rgba(255, 255, 255, 0.1);
+  }
+}
 
 :root {
   --background: #ffffff;

@@ -10,6 +10,14 @@ export interface StreamOptions {
   system: string;
   messages: NeutralMessage[];
   maxTokens: number;
+  // adaptive thinking 사용 여부 (지원 모델에서만 켤 것 — models.ts 참고)
+  thinking?: boolean;
+  // 웹 검색 서버 도구 사용 여부 (Anthropic 전용)
+  webSearch?: boolean;
+  // 프롬프트 캐싱 사용 여부 (Anthropic 전용). 히스토리가 append-only 인
+  // 동안만 켤 것 — 슬라이딩 윈도우가 시작되면 프리픽스가 바뀌어 캐시가
+  // 매번 빗나가면서 쓰기 비용(1.25x)만 든다.
+  cache?: boolean;
   // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
   onUsage?: (u: { input: number; output: number }) => void;
 }
@@ -64,15 +72,58 @@ export async function* streamClaude({
   system,
   messages,
   maxTokens,
+  thinking,
+  webSearch,
+  cache,
   onUsage,
 }: StreamOptions): AsyncGenerator<string> {
   const anthropic = getClient();
+
+  const anthropicMessages = messages.map(toAnthropicMessage);
+  // 프롬프트 캐싱: 마지막 메시지의 마지막 블록에 캐시 브레이크포인트를 찍으면
+  // 다음 턴에서 이전 대화 전체(시스템+히스토리)가 프리픽스 캐시로 재사용된다.
+  // (최소 캐시 길이 미만이면 API가 조용히 무시 — 무해)
+  if (cache && anthropicMessages.length > 0) {
+    const last = anthropicMessages[anthropicMessages.length - 1];
+    if (typeof last.content === "string") {
+      last.content = [
+        {
+          type: "text",
+          text: last.content,
+          cache_control: { type: "ephemeral" },
+        },
+      ];
+    } else if (last.content.length > 0) {
+      (
+        last.content[last.content.length - 1] as {
+          cache_control?: { type: "ephemeral" };
+        }
+      ).cache_control = { type: "ephemeral" };
+    }
+  }
+
   const stream = anthropic.beta.messages.stream({
     model,
     max_tokens: maxTokens,
     system,
-    messages: messages.map(toAnthropicMessage),
+    messages: anthropicMessages,
     betas: [FILES_BETA],
+    // adaptive thinking: 모델이 필요할 때만 스스로 사고. display 기본값(omitted)
+    // 이라 사고 내용은 스트림에 노출되지 않고 답변 품질만 올라간다.
+    ...(thinking ? { thinking: { type: "adaptive" as const } } : {}),
+    // 웹 검색은 서버 도구라 선언만 하면 API가 알아서 실행한다.
+    // max_uses로 요청당 검색 횟수를 제한해 비용을 방어.
+    ...(webSearch
+      ? {
+          tools: [
+            {
+              type: "web_search_20260209" as const,
+              name: "web_search" as const,
+              max_uses: 3,
+            },
+          ],
+        }
+      : {}),
   });
 
   let inputTokens = 0;
@@ -81,7 +132,12 @@ export async function* streamClaude({
   for await (const event of stream) {
     if (event.type === "message_start") {
       // message_start.message.usage 에 입력 토큰이 들어온다.
-      inputTokens = event.message.usage.input_tokens ?? 0;
+      // 캐시 사용 시 input_tokens 는 비캐시 분량만이라 캐시 읽기/쓰기도 합산.
+      const u = event.message.usage;
+      inputTokens =
+        (u.input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0);
     } else if (
       event.type === "content_block_delta" &&
       event.delta.type === "text_delta"
@@ -94,6 +150,39 @@ export async function* streamClaude({
   }
 
   onUsage?.({ input: inputTokens, output: outputTokens });
+}
+
+// 제목 생성 전용 모델 — 가장 저렴하고 빠른 Haiku.
+const TITLE_MODEL = "claude-haiku-4-5-20251001";
+
+/** 첫 문답 내용으로 대화 제목(짧은 한국어)을 생성한다. 실패 시 null. */
+export async function generateTitle(
+  question: string,
+  answer: string,
+): Promise<string | null> {
+  try {
+    const anthropic = getClient();
+    const res = await anthropic.messages.create({
+      model: TITLE_MODEL,
+      max_tokens: 64,
+      system:
+        "대화 목록에 표시할 제목을 만든다. 사용자 질문의 주제를 담아 한국어 15자 이내로. 따옴표·마침표·이모지 없이 제목 텍스트만 출력한다.",
+      messages: [
+        {
+          role: "user",
+          content: `질문: ${question.slice(0, 500)}\n\n답변(일부): ${answer.slice(0, 500)}`,
+        },
+      ],
+    });
+    const block = res.content.find((b) => b.type === "text");
+    const raw = block && block.type === "text" ? block.text : "";
+    const title = raw.trim().replace(/^["'「]+|["'」.]+$/g, "").trim();
+    if (!title) return null;
+    return title.length > 30 ? `${title.slice(0, 30)}…` : title;
+  } catch (err) {
+    console.error("[claude:generateTitle]", err);
+    return null;
+  }
 }
 
 /**

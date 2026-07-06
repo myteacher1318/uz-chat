@@ -23,7 +23,15 @@ export default function Gate() {
         window.location.reload(); // 서버 컴포넌트가 인증 상태로 다시 렌더링
         return;
       }
-      setErr("코드가 올바르지 않습니다.");
+      // 서버가 준 메시지(레이트리밋 등)를 우선 표시
+      let msg = "코드가 올바르지 않습니다.";
+      try {
+        const d = await res.json();
+        if (typeof d?.error === "string") msg = d.error;
+      } catch {
+        /* noop */
+      }
+      setErr(msg);
     } catch {
       setErr("확인 중 오류가 발생했습니다.");
     } finally {

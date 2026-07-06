@@ -1,4 +1,4 @@
-import { streamClaude } from "@/lib/ai/claude";
+import { generateTitle, streamClaude } from "@/lib/ai/claude";
 import { streamOpenAI } from "@/lib/ai/openai";
 import { resolveModel } from "@/lib/ai/models";
 import { getSupabase } from "@/lib/supabaseServer";
@@ -97,9 +97,19 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const root = body as
-    | { messages?: unknown; model?: unknown; conversationId?: unknown }
+    | {
+        messages?: unknown;
+        model?: unknown;
+        conversationId?: unknown;
+        webSearch?: unknown;
+        mode?: unknown;
+      }
     | null;
   const messages = root?.messages;
+  const webSearchRequested = root?.webSearch === true;
+  // normal: 새 질문 / regenerate: 같은 질문으로 응답만 다시 / edit: 마지막 턴 교체
+  const mode: "normal" | "regenerate" | "edit" =
+    root?.mode === "regenerate" || root?.mode === "edit" ? root.mode : "normal";
   if (!Array.isArray(messages)) {
     return Response.json(
       { error: "messages는 배열이어야 합니다." },
@@ -214,9 +224,38 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // 5.2) 재생성/수정 모드: 대화 끝의 이전 턴 기록을 정리해 DB 중복을 막는다.
+  //  - regenerate: 마지막 assistant 응답(들)만 삭제 (새 응답으로 대체)
+  //  - edit: 마지막 assistant 응답(들) + 마지막 user 메시지 삭제 (수정본으로 대체)
+  if (supabase && conversationId && mode !== "normal") {
+    try {
+      const { data: tail } = await supabase
+        .from("messages")
+        .select("id, role")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false })
+        .limit(10);
+      const ids: string[] = [];
+      for (const r of tail ?? []) {
+        if (r.role === "assistant") {
+          ids.push(r.id);
+          continue;
+        }
+        if (r.role === "user" && mode === "edit") ids.push(r.id);
+        break;
+      }
+      if (ids.length > 0) {
+        await supabase.from("messages").delete().in("id", ids);
+      }
+    } catch (err) {
+      console.error("[api/chat] turn reconcile error:", err);
+    }
+  }
+
   // 5.5) 사용량/접속 집계 — conversations/messages 와 분리된 누적 카운터에 기록.
   //      (대화 저장 여부·삭제와 무관하게 남는다. 인라인 첨부 용량도 여기서 누적)
-  if (supabase && lastRaw?.role === "user") {
+  //      재생성은 새 질문이 아니므로 user_messages 를 다시 세지 않는다.
+  if (supabase && lastRaw?.role === "user" && mode !== "regenerate") {
     const rawAtts = Array.isArray(lastRaw.attachments) ? lastRaw.attachments : [];
     let inlineCount = 0;
     let inlineBytes = 0;
@@ -240,8 +279,9 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // 6) (부수 처리) 새 user 메시지를 DB에 저장 — base64는 저장하지 않고 메타만.
+  //    재생성 모드에서는 같은 질문이 이미 저장돼 있으므로 건너뛴다.
   const nowIso = () => new Date().toISOString();
-  if (supabase && conversationId && lastRaw?.role === "user") {
+  if (supabase && conversationId && lastRaw?.role === "user" && mode !== "regenerate") {
     try {
       await supabase.from("messages").insert({
         conversation_id: conversationId,
@@ -260,63 +300,114 @@ export async function POST(req: Request): Promise<Response> {
 
   // 7) provider 선택 후 스트림. 동시에 전체 텍스트를 누적해 종료 시 assistant 저장.
   const streamFn = modelDef.provider === "openai" ? streamOpenAI : streamClaude;
+  const webSearch = webSearchRequested && modelDef.provider === "anthropic";
+  // 도구가 실제로 있을 때만 검색 지침을 추가 (없는 도구를 언급하면 환각 유발)
+  const system = webSearch
+    ? `${SYSTEM_PROMPT}\n- 최신 정보가 필요하거나 사실 확인이 필요하면 web_search 도구로 검색한 뒤 답합니다.`
+    : SYSTEM_PROMPT;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let full = "";
+      let clientGone = false; // 중지 버튼/탭 닫힘 등으로 클라이언트가 끊긴 상태
       const usageRef: { value: { input: number; output: number } | null } = {
         value: null,
       };
       try {
         for await (const chunk of streamFn({
           model,
-          system: SYSTEM_PROMPT,
+          system,
           messages: recent,
           maxTokens: modelDef.maxTokens,
+          thinking: modelDef.adaptiveThinking === true,
+          webSearch,
+          // 히스토리가 잘리기 전(append-only)에만 캐싱 — 윈도우가 밀리기
+          // 시작하면 프리픽스가 매번 달라져 캐시 이득이 없다.
+          cache: built.length < historyLimit,
           onUsage: (u) => {
             usageRef.value = u;
           },
         })) {
           full += chunk;
-          controller.enqueue(encoder.encode(chunk));
-        }
-
-        if (supabase && conversationId && full.trim()) {
           try {
-            await supabase.from("messages").insert({
-              conversation_id: conversationId,
-              role: "assistant",
-              content: full,
-              model,
-              attachments: null,
-            });
-            await supabase
-              .from("conversations")
-              .update({ updated_at: nowIso() })
-              .eq("id", conversationId);
-          } catch (err) {
-            console.error("[api/chat] assistant message save error:", err);
+            controller.enqueue(encoder.encode(chunk));
+          } catch {
+            // 클라이언트 중단 — 생성을 멈추고 지금까지의 부분 응답만 저장한다.
+            clientGone = true;
+            break;
           }
-        }
-
-        // 응답 1건 + 토큰 사용량을 누적 원장에 기록 (삭제와 무관하게 보존).
-        if (supabase && usageRef.value) {
-          await recordUsageEvent(supabase, {
-            provider: modelDef.provider,
-            model,
-            input: usageRef.value.input,
-            output: usageRef.value.output,
-          });
         }
       } catch (err) {
         console.error("[api/chat] streaming error:", err);
         const detail = err instanceof Error ? err.message : "알 수 없는 오류";
-        controller.enqueue(
-          encoder.encode(`\n\n⚠️ 응답 생성 중 문제가 발생했습니다: ${detail}`),
-        );
-      } finally {
+        if (!clientGone) {
+          try {
+            controller.enqueue(
+              encoder.encode(`\n\n⚠️ 응답 생성 중 문제가 발생했습니다: ${detail}`),
+            );
+          } catch {
+            /* 전송 실패해도 저장은 계속 */
+          }
+        }
+      }
+
+      // 저장/집계는 클라이언트 연결 여부와 무관하게 수행 (부분 응답도 보존)
+      if (supabase && conversationId && full.trim()) {
+        try {
+          await supabase.from("messages").insert({
+            conversation_id: conversationId,
+            role: "assistant",
+            content: full,
+            model,
+            attachments: null,
+          });
+          await supabase
+            .from("conversations")
+            .update({ updated_at: nowIso() })
+            .eq("id", conversationId);
+
+          // 첫 문답이면 Haiku로 대화 제목 생성 — fire-and-forget.
+          // (Render 상시 프로세스에서 응답 종료 후에도 완료된다)
+          const isFirstUserTurn =
+            built.filter((m) => m.role === "user").length === 1;
+          if (isFirstUserTurn) {
+            const sb = supabase;
+            const cid = conversationId;
+            void (async () => {
+              try {
+                const title = await generateTitle(lastText, full);
+                if (title) {
+                  await sb
+                    .from("conversations")
+                    .update({ title })
+                    .eq("id", cid);
+                }
+              } catch (err) {
+                console.error("[api/chat] title generation error:", err);
+              }
+            })();
+          }
+        } catch (err) {
+          console.error("[api/chat] assistant message save error:", err);
+        }
+      }
+
+      // 응답 1건 + 토큰 사용량을 누적 원장에 기록 (삭제와 무관하게 보존).
+      // 중단된 응답은 usage 이벤트가 오지 않아 기록되지 않는다 (허용).
+      if (supabase && usageRef.value) {
+        await recordUsageEvent(supabase, {
+          provider: modelDef.provider,
+          model,
+          input: usageRef.value.input,
+          output: usageRef.value.output,
+        });
+      }
+
+      try {
         controller.close();
+      } catch {
+        /* 이미 닫힘 */
       }
     },
   });

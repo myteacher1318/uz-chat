@@ -9,6 +9,7 @@ import {
   isAllowedType,
 } from "@/lib/attachments";
 import { MODELS } from "@/lib/ai/models";
+import Markdown from "./Markdown";
 
 type Conversation = { id: string; title: string; updated_at: string };
 
@@ -52,6 +53,8 @@ export default function ChatClient() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState<string>(MODELS[0].id);
+  const [webSearch, setWebSearch] = useState(false);
+  const [editPending, setEditPending] = useState(false); // 다음 전송이 '마지막 턴 수정'인지
   const [pending, setPending] = useState<UIAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -60,6 +63,9 @@ export default function ChatClient() {
   const [deleting, setDeleting] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const stickToBottom = useRef(true); // 사용자가 바닥 근처에 있을 때만 자동 스크롤
+  const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
@@ -75,9 +81,19 @@ export default function ChatClient() {
     })();
   }, []);
 
+  // 자동 스크롤 — 사용자가 위로 스크롤해 읽는 중이면 방해하지 않는다.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (stickToBottom.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "auto" });
+    }
   }, [messages]);
+
+  function onMainScroll() {
+    const el = mainRef.current;
+    if (!el) return;
+    stickToBottom.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -141,6 +157,7 @@ export default function ChatClient() {
     setPending([]);
     setInput("");
     setAttachError(null);
+    setEditPending(false);
     setSidebarOpen(false);
   }
 
@@ -151,6 +168,7 @@ export default function ChatClient() {
     setPending([]);
     setInput("");
     setAttachError(null);
+    setEditPending(false);
     void loadMessages(id);
   }
 
@@ -270,55 +288,32 @@ export default function ChatClient() {
     });
   }
 
-  // ── 전송 ──────────────────────────────────────
-  async function send() {
-    const text = input.trim();
-    const uploading = pending.some((p) => p.uploading);
-    if ((text === "" && pending.length === 0) || loading || uploading) return;
-
-    // 1) 대화 확보 — 없으면 새로 생성 (실패해도 채팅은 진행, 저장만 생략)
-    let convId = activeConversationId;
-    if (!convId) {
-      try {
-        const res = await fetch("/api/conversations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ firstMessage: text }),
-        });
-        if (res.ok) {
-          const conv = (await res.json()) as { id: string };
-          convId = conv.id;
-          setActiveConversationId(convId);
-          void refreshConversations();
-        }
-      } catch {
-        /* Supabase 미설정 등 — 저장 없이 진행 */
-      }
-    }
-
-    const userMsg: Message = {
-      role: "user",
-      content: text,
-      attachments: pending.length ? pending : undefined,
-    };
-    const nextMessages: Message[] = [...messages, userMsg];
-
-    setMessages(nextMessages);
-    setInput("");
-    setPending([]);
-    setAttachError(null);
+  // ── 전송/재생성/수정 공통 스트리밍 ──────────────
+  // history 는 반드시 user 메시지로 끝나야 한다.
+  async function streamTurn(
+    convId: string | null,
+    history: Message[],
+    mode: "normal" | "edit" | "regenerate",
+  ) {
     setLoading(true);
+    stickToBottom.current = true; // 전송 시엔 항상 바닥으로
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           model,
+          webSearch,
+          mode,
           conversationId: convId,
           // 오류 말풍선(⚠️)은 모델에 보내지 않는다 — 가짜 문맥 오염 방지
-          messages: nextMessages.filter((m) => !m.error).map((m) => ({
+          messages: history.filter((m) => !m.error).map((m) => ({
             role: m.role,
             content: m.content,
             // 데이터가 있는 첨부만 전송 (복원된 메타데이터 전용 첨부는 제외)
@@ -362,20 +357,108 @@ export default function ChatClient() {
         });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "오류가 발생했습니다.";
-      setMessages((prev) => {
-        const copy = [...prev];
-        copy[copy.length - 1] = {
-          role: "assistant",
-          content: `⚠️ ${msg}`,
-          error: true,
-        };
-        return copy;
-      });
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // 사용자가 중지 — 부분 응답은 그대로 두고, 아무것도 못 받았으면 말풍선 제거
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && last.content === "") {
+            return prev.slice(0, -1);
+          }
+          return prev;
+        });
+      } else {
+        const msg = err instanceof Error ? err.message : "오류가 발생했습니다.";
+        setMessages((prev) => {
+          const copy = [...prev];
+          copy[copy.length - 1] = {
+            role: "assistant",
+            content: `⚠️ ${msg}`,
+            error: true,
+          };
+          return copy;
+        });
+      }
     } finally {
+      abortRef.current = null;
       setLoading(false);
       void refreshConversations(); // 새 대화/제목/순서 반영
+      // 첫 문답의 제목은 응답 종료 후 서버가 비동기로 생성 — 잠시 뒤 한 번 더 반영
+      setTimeout(() => void refreshConversations(), 3000);
     }
+  }
+
+  // ── 전송 ──────────────────────────────────────
+  async function send() {
+    const text = input.trim();
+    const uploadingNow = pending.some((p) => p.uploading);
+    if ((text === "" && pending.length === 0) || loading || uploadingNow) return;
+
+    // 1) 대화 확보 — 없으면 새로 생성 (실패해도 채팅은 진행, 저장만 생략)
+    let convId = activeConversationId;
+    if (!convId) {
+      try {
+        const res = await fetch("/api/conversations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ firstMessage: text }),
+        });
+        if (res.ok) {
+          const conv = (await res.json()) as { id: string };
+          convId = conv.id;
+          setActiveConversationId(convId);
+          void refreshConversations();
+        }
+      } catch {
+        /* Supabase 미설정 등 — 저장 없이 진행 */
+      }
+    }
+
+    const userMsg: Message = {
+      role: "user",
+      content: text,
+      attachments: pending.length ? pending : undefined,
+    };
+    const nextMessages: Message[] = [...messages, userMsg];
+
+    setMessages(nextMessages);
+    setInput("");
+    setPending([]);
+    setAttachError(null);
+
+    const mode = editPending ? "edit" : "normal";
+    setEditPending(false);
+    await streamTurn(convId, nextMessages, mode);
+  }
+
+  // 마지막 assistant 응답을 버리고 같은 질문으로 다시 생성
+  async function regenerate() {
+    if (loading) return;
+    const history = [...messages];
+    while (history.length && history[history.length - 1].role === "assistant") {
+      history.pop();
+    }
+    if (history.length === 0 || history[history.length - 1].role !== "user") {
+      return;
+    }
+    setMessages(history);
+    await streamTurn(activeConversationId, history, "regenerate");
+  }
+
+  // 마지막 사용자 메시지를 입력창으로 되돌려 수정 후 재전송.
+  // (첨부는 복원하지 않음 — 필요하면 다시 첨부)
+  function editMessage(index: number) {
+    if (loading) return;
+    const target = messages[index];
+    if (!target || target.role !== "user") return;
+    setInput(target.content);
+    setMessages(messages.slice(0, index));
+    setEditPending(true);
+    textareaRef.current?.focus();
+  }
+
+  // 응답 생성 중지 — 서버는 끊김을 감지해 부분 응답까지 저장한다.
+  function stopGenerating() {
+    abortRef.current?.abort();
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -418,6 +501,23 @@ export default function ChatClient() {
   const uploading = pending.some((p) => p.uploading);
   const canSend =
     !loading && !uploading && (input.trim() !== "" || pending.length > 0);
+
+  const currentModel = MODELS.find((m) => m.id === model);
+  const isAnthropic = currentModel?.provider === "anthropic";
+
+  // 마지막 user 메시지 위치 — 수정 버튼은 여기에만 표시
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  // GPT 모델은 Files API 첨부(2MB 초과)를 읽지 못한다 — 조용히 무시되므로 경고
+  const gptFileWarning =
+    !isAnthropic &&
+    (pending.some((p) => p.fileId) ||
+      messages.some((m) => m.attachments?.some((a) => a.fileId)));
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -519,7 +619,7 @@ export default function ChatClient() {
         </header>
 
         {/* 메시지 영역 */}
-        <main className="flex-1 overflow-y-auto">
+        <main ref={mainRef} onScroll={onMainScroll} className="flex-1 overflow-y-auto">
           <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
             {isEmpty && (
               <div className="mt-24 text-center text-zinc-500 dark:text-zinc-400">
@@ -531,7 +631,24 @@ export default function ChatClient() {
             )}
 
             {messages.map((m, i) => (
-              <MessageBubble key={i} message={m} />
+              <MessageBubble
+                key={i}
+                message={m}
+                onEdit={
+                  !loading && !editPending && m.role === "user" && i === lastUserIndex
+                    ? () => editMessage(i)
+                    : undefined
+                }
+                onRegenerate={
+                  !loading &&
+                  !editPending &&
+                  m.role === "assistant" &&
+                  i === messages.length - 1 &&
+                  m.content !== ""
+                    ? () => void regenerate()
+                    : undefined
+                }
+              />
             ))}
 
             {loading &&
@@ -553,23 +670,45 @@ export default function ChatClient() {
         <footer className="border-t border-black/[.08] px-4 py-3 dark:border-white/[.12]">
           <div className="mx-auto max-w-3xl">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                모델
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
-                >
-                  {MODELS.map((m) => (
-                    <option key={m.id} value={m.id} className="text-black">
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {attachError && (
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  모델
+                  <select
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
+                  >
+                    {MODELS.map((m) => (
+                      <option key={m.id} value={m.id} className="text-black">
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {isAnthropic && (
+                  <button
+                    type="button"
+                    onClick={() => setWebSearch((v) => !v)}
+                    aria-pressed={webSearch}
+                    title="켜면 Claude가 필요할 때 웹을 검색해 답합니다"
+                    className={[
+                      "rounded-md border px-2 py-1 text-xs transition-colors",
+                      webSearch
+                        ? "border-blue-500/60 bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                        : "border-black/[.1] text-zinc-500 hover:bg-black/[.04] dark:border-white/[.15] dark:text-zinc-400 dark:hover:bg-white/[.06]",
+                    ].join(" ")}
+                  >
+                    🌐 웹 검색{webSearch ? " 켬" : ""}
+                  </button>
+                )}
+              </div>
+              {attachError ? (
                 <span className="truncate text-xs text-red-500">{attachError}</span>
-              )}
+              ) : gptFileWarning ? (
+                <span className="truncate text-xs text-amber-600 dark:text-amber-400">
+                  GPT 모델은 2MB 초과 첨부를 읽지 못합니다
+                </span>
+              ) : null}
             </div>
 
             {pending.length > 0 && (
@@ -622,14 +761,25 @@ export default function ChatClient() {
                 placeholder="메시지를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"
                 className="max-h-[200px] flex-1 resize-none rounded-2xl border border-black/[.1] bg-transparent px-4 py-3 text-[15px] leading-6 outline-none placeholder:text-zinc-400 focus:border-black/30 disabled:opacity-60 dark:border-white/[.15] dark:focus:border-white/40"
               />
-              <button
-                type="button"
-                onClick={() => void send()}
-                disabled={!canSend}
-                className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
-              >
-                {uploading ? "업로드 중" : "전송"}
-              </button>
+              {loading ? (
+                <button
+                  type="button"
+                  onClick={stopGenerating}
+                  aria-label="응답 중지"
+                  className="h-11 shrink-0 rounded-2xl border border-black/[.15] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.2] dark:hover:bg-white/[.06]"
+                >
+                  ■ 중지
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void send()}
+                  disabled={!canSend}
+                  className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  {uploading ? "업로드 중" : "전송"}
+                </button>
+              )}
             </div>
           </div>
         </footer>
@@ -689,7 +839,15 @@ export default function ChatClient() {
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  onEdit,
+  onRegenerate,
+}: {
+  message: Message;
+  onEdit?: () => void;
+  onRegenerate?: () => void;
+}) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -724,19 +882,48 @@ function MessageBubble({ message }: { message: Message }) {
             ))}
           </div>
         )}
-        {message.content && (
-          <div className="whitespace-pre-wrap">{message.content}</div>
-        )}
+        {message.content &&
+          (isUser || message.error ? (
+            <div className="whitespace-pre-wrap">{message.content}</div>
+          ) : (
+            <Markdown content={message.content} />
+          ))}
       </div>
-      {showCopy && (
-        <button
-          type="button"
-          onClick={copy}
-          aria-label="메시지 복사"
-          className="mt-1 px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
-        >
-          {copied ? "복사됨 ✓" : "📋 복사"}
-        </button>
+      {(showCopy || onEdit || onRegenerate) && (
+        <div className="mt-1 flex gap-2">
+          {showCopy && (
+            <button
+              type="button"
+              onClick={copy}
+              aria-label="메시지 복사"
+              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+            >
+              {copied ? "복사됨 ✓" : "📋 복사"}
+            </button>
+          )}
+          {onEdit && (
+            <button
+              type="button"
+              onClick={onEdit}
+              aria-label="메시지 수정"
+              title="이 메시지를 수정해 다시 보냅니다"
+              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+            >
+              ✏️ 수정
+            </button>
+          )}
+          {onRegenerate && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              aria-label="응답 재생성"
+              title="이 응답을 버리고 다시 생성합니다"
+              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+            >
+              🔄 재생성
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
