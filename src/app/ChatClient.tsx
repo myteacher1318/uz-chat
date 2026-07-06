@@ -111,7 +111,7 @@ export default function ChatClient() {
       const rows = (await res.json()) as {
         role: "user" | "assistant";
         content: string;
-        attachments: { name: string; type: string }[] | null;
+        attachments: { name: string; type: string; fileId?: string }[] | null;
       }[];
       setMessages(
         rows.map((r) => ({
@@ -123,6 +123,9 @@ export default function ChatClient() {
                 name: a.name,
                 mediaType: a.type,
                 size: 0,
+                // Files API 첨부는 fileId를 복원해 새로고침 후에도
+                // 후속 질문에서 파일 문맥이 유지되게 한다.
+                fileId: typeof a.fileId === "string" ? a.fileId : undefined,
               }))
             : undefined,
         })),
@@ -314,7 +317,8 @@ export default function ChatClient() {
         body: JSON.stringify({
           model,
           conversationId: convId,
-          messages: nextMessages.map((m) => ({
+          // 오류 말풍선(⚠️)은 모델에 보내지 않는다 — 가짜 문맥 오염 방지
+          messages: nextMessages.filter((m) => !m.error).map((m) => ({
             role: m.role,
             content: m.content,
             // 데이터가 있는 첨부만 전송 (복원된 메타데이터 전용 첨부는 제외)

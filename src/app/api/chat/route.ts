@@ -204,6 +204,15 @@ export async function POST(req: Request): Promise<Response> {
   const supabase = getSupabaseSafe();
   const historyLimit = await getHistoryLimit(supabase);
   const recent = built.slice(-historyLimit);
+  // Anthropic API는 첫 메시지가 user여야 한다 — 잘린 히스토리가
+  // assistant로 시작하면(짝수 limit에서 발생) 앞쪽 assistant를 제거.
+  while (recent.length > 0 && recent[0].role === "assistant") recent.shift();
+  if (recent.length === 0) {
+    return Response.json(
+      { error: "유효한 메시지가 없습니다." },
+      { status: 400 },
+    );
+  }
 
   // 5.5) 사용량/접속 집계 — conversations/messages 와 분리된 누적 카운터에 기록.
   //      (대화 저장 여부·삭제와 무관하게 남는다. 인라인 첨부 용량도 여기서 누적)
