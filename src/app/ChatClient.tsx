@@ -520,7 +520,10 @@ export default function ChatClient() {
       messages.some((m) => m.attachments?.some((a) => a.fileId)));
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    // 채팅 화면은 뷰포트 높이에 고정 — 대화가 길어져도 문서 전체가 스크롤되지
+    // 않도록 해, 사이드바(대화 목록)와 헤더/입력창이 항상 제자리에 머물게 한다.
+    // (공유 body 는 min-h-full 이라 admin 페이지의 문서 스크롤은 그대로 유지)
+    <div className="flex h-dvh overflow-hidden">
       {/* 모바일 백드롭 */}
       {sidebarOpen && (
         <div
