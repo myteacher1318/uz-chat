@@ -8,7 +8,12 @@ import {
   MAX_FILE_BYTES,
   isAllowedType,
 } from "@/lib/attachments";
-import { MODELS } from "@/lib/ai/models";
+import {
+  MODELS,
+  THINKING_DEPTHS,
+  DEFAULT_THINKING_DEPTH,
+  type ThinkingDepth,
+} from "@/lib/ai/models";
 import Markdown from "./Markdown";
 
 type Conversation = { id: string; title: string; updated_at: string };
@@ -54,6 +59,7 @@ export default function ChatClient() {
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState<string>(MODELS[0].id);
   const [webSearch, setWebSearch] = useState(false);
+  const [depth, setDepth] = useState<ThinkingDepth>(DEFAULT_THINKING_DEPTH);
   const [editPending, setEditPending] = useState(false); // 다음 전송이 '마지막 턴 수정'인지
   const [pending, setPending] = useState<UIAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -310,6 +316,7 @@ export default function ChatClient() {
         body: JSON.stringify({
           model,
           webSearch,
+          depth,
           mode,
           conversationId: convId,
           // 오류 말풍선(⚠️)은 모델에 보내지 않는다 — 가짜 문맥 오염 방지
@@ -504,6 +511,8 @@ export default function ChatClient() {
 
   const currentModel = MODELS.find((m) => m.id === model);
   const isAnthropic = currentModel?.provider === "anthropic";
+  // 사고 깊이는 adaptive thinking 지원 모델(Sonnet 5·Opus 4.8)에서만 의미가 있다.
+  const supportsDepth = currentModel?.adaptiveThinking === true;
 
   // 마지막 user 메시지 위치 — 수정 버튼은 여기에만 표시
   let lastUserIndex = -1;
@@ -673,7 +682,7 @@ export default function ChatClient() {
         <footer className="border-t border-black/[.08] px-4 py-3 dark:border-white/[.12]">
           <div className="mx-auto max-w-3xl">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
                   모델
                   <select
@@ -688,6 +697,25 @@ export default function ChatClient() {
                     ))}
                   </select>
                 </label>
+                {supportsDepth && (
+                  <label
+                    className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400"
+                    title="빠르게: 사고 없이 최소 지연 · 표준·깊게: 필요할 때 더 신중히 사고합니다"
+                  >
+                    사고 깊이
+                    <select
+                      value={depth}
+                      onChange={(e) => setDepth(e.target.value as ThinkingDepth)}
+                      className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
+                    >
+                      {THINKING_DEPTHS.map((d) => (
+                        <option key={d.id} value={d.id} className="text-black">
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {isAnthropic && (
                   <button
                     type="button"

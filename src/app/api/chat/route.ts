@@ -1,6 +1,6 @@
 import { generateTitle, streamClaude } from "@/lib/ai/claude";
 import { streamOpenAI } from "@/lib/ai/openai";
-import { resolveModel } from "@/lib/ai/models";
+import { depthParams, resolveModel, resolveThinkingDepth } from "@/lib/ai/models";
 import { getSupabase } from "@/lib/supabaseServer";
 import { INLINE_MAX_BYTES, isAllowedType } from "@/lib/attachments";
 import {
@@ -102,11 +102,16 @@ export async function POST(req: Request): Promise<Response> {
         model?: unknown;
         conversationId?: unknown;
         webSearch?: unknown;
+        depth?: unknown;
         mode?: unknown;
       }
     | null;
   const messages = root?.messages;
   const webSearchRequested = root?.webSearch === true;
+  // 사고 깊이 — 허용값 밖이면 기본값(빠르게)으로 보정.
+  const depth = resolveThinkingDepth(
+    typeof root?.depth === "string" ? root.depth : undefined,
+  );
   // normal: 새 질문 / regenerate: 같은 질문으로 응답만 다시 / edit: 마지막 턴 교체
   const mode: "normal" | "regenerate" | "edit" =
     root?.mode === "regenerate" || root?.mode === "edit" ? root.mode : "normal";
@@ -301,6 +306,10 @@ export async function POST(req: Request): Promise<Response> {
   // 7) provider 선택 후 스트림. 동시에 전체 텍스트를 누적해 종료 시 assistant 저장.
   const streamFn = modelDef.provider === "openai" ? streamOpenAI : streamClaude;
   const webSearch = webSearchRequested && modelDef.provider === "anthropic";
+  // 사고 깊이: adaptive thinking 지원 모델(Sonnet 5·Opus 4.8 등)에서만
+  // thinking/effort를 보낸다. Haiku·GPT는 미지원이라 undefined로 두어
+  // 파라미터 자체를 생략한다(보내면 400).
+  const depthCfg = modelDef.adaptiveThinking === true ? depthParams(depth) : null;
   // 도구가 실제로 있을 때만 검색 지침을 추가 (없는 도구를 언급하면 환각 유발)
   const system = webSearch
     ? `${SYSTEM_PROMPT}\n- 최신 정보가 필요하거나 사실 확인이 필요하면 web_search 도구로 검색한 뒤 답합니다.`
@@ -320,7 +329,8 @@ export async function POST(req: Request): Promise<Response> {
           system,
           messages: recent,
           maxTokens: modelDef.maxTokens,
-          thinking: modelDef.adaptiveThinking === true,
+          thinking: depthCfg?.thinking,
+          effort: depthCfg?.effort,
           webSearch,
           // 히스토리가 잘리기 전(append-only)에만 캐싱 — 윈도우가 밀리기
           // 시작하면 프리픽스가 매번 달라져 캐시 이득이 없다.

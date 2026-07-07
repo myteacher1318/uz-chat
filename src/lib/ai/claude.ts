@@ -10,8 +10,13 @@ export interface StreamOptions {
   system: string;
   messages: NeutralMessage[];
   maxTokens: number;
-  // adaptive thinking 사용 여부 (지원 모델에서만 켤 것 — models.ts 참고)
+  // 사고(thinking) 사용 여부 — adaptive thinking 지원 모델에서만 지정할 것.
+  //   true  → thinking: adaptive (모델이 필요할 때 스스로 사고)
+  //   false → thinking: disabled (사고 끔 — 가장 빠름)
+  //   undefined → 파라미터 미전송 (Haiku 등 미지원 모델용)
   thinking?: boolean;
+  // 사고 깊이 → output_config.effort. thinking과 마찬가지로 지원 모델에서만.
+  effort?: "low" | "medium" | "high";
   // 웹 검색 서버 도구 사용 여부 (Anthropic 전용)
   webSearch?: boolean;
   // 프롬프트 캐싱 사용 여부 (Anthropic 전용). 히스토리가 append-only 인
@@ -73,6 +78,7 @@ export async function* streamClaude({
   messages,
   maxTokens,
   thinking,
+  effort,
   webSearch,
   cache,
   onUsage,
@@ -108,9 +114,19 @@ export async function* streamClaude({
     system,
     messages: anthropicMessages,
     betas: [FILES_BETA],
-    // adaptive thinking: 모델이 필요할 때만 스스로 사고. display 기본값(omitted)
+    // 사고(thinking): 지원 모델에서만 지정(true/false). display 기본값(omitted)
     // 이라 사고 내용은 스트림에 노출되지 않고 답변 품질만 올라간다.
-    ...(thinking ? { thinking: { type: "adaptive" as const } } : {}),
+    //   adaptive  → 필요할 때만 스스로 사고 (표준/깊게)
+    //   disabled  → 사고 끔, 최소 지연 (빠르게)
+    ...(thinking !== undefined
+      ? {
+          thinking: thinking
+            ? { type: "adaptive" as const }
+            : { type: "disabled" as const },
+        }
+      : {}),
+    // 사고 깊이 → effort. 사고·응답 토큰 예산을 조절한다 (지원 모델 전용).
+    ...(effort ? { output_config: { effort } } : {}),
     // 웹 검색은 서버 도구라 선언만 하면 API가 알아서 실행한다.
     // max_uses로 요청당 검색 횟수를 제한해 비용을 방어.
     ...(webSearch
