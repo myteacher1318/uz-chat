@@ -62,6 +62,34 @@ function approxBytesFromBase64(b64: string): number {
 
 // 첨부에서 DB 저장용 메타데이터만 추출 (base64 데이터는 저장하지 않음).
 // Files API 첨부는 file_id도 함께 저장한다 — 대화 삭제 시 Anthropic 파일 정리용.
+let historyLimitCache: { value: number; expiresAt: number } | null = null;
+
+async function getHistoryLimitFast(
+  supabase: ReturnType<typeof getSupabaseSafe>,
+): Promise<number> {
+  if (!supabase) return DEFAULT_HISTORY_LIMIT;
+
+  const now = Date.now();
+  if (historyLimitCache && historyLimitCache.expiresAt > now) {
+    return historyLimitCache.value;
+  }
+
+  const fetchAndCache = getHistoryLimit(supabase)
+    .then((n) => {
+      historyLimitCache = { value: n, expiresAt: Date.now() + 60_000 };
+      return n;
+    })
+    .catch(() => DEFAULT_HISTORY_LIMIT);
+
+  const timeoutMs = 200;
+  return await Promise.race<number>([
+    fetchAndCache,
+    new Promise<number>((resolve) =>
+      setTimeout(() => resolve(DEFAULT_HISTORY_LIMIT), timeoutMs),
+    ),
+  ]);
+}
+
 function attachmentMeta(
   attachments: unknown,
 ): { name: string; type: string; fileId?: string }[] | null {
@@ -217,7 +245,7 @@ export async function POST(req: Request): Promise<Response> {
 
   // 5) 비용 보호: 최근 N개만 전송 (N은 settings에서 읽고, 실패 시 기본 20)
   const supabase = getSupabaseSafe();
-  const historyLimit = await getHistoryLimit(supabase);
+  const historyLimit = await getHistoryLimitFast(supabase);
   const recent = built.slice(-historyLimit);
   // Anthropic API는 첫 메시지가 user여야 한다 — 잘린 히스토리가
   // assistant로 시작하면(짝수 limit에서 발생) 앞쪽 assistant를 제거.
@@ -232,6 +260,10 @@ export async function POST(req: Request): Promise<Response> {
   // 5.2) 재생성/수정 모드: 대화 끝의 이전 턴 기록을 정리해 DB 중복을 막는다.
   //  - regenerate: 마지막 assistant 응답(들)만 삭제 (새 응답으로 대체)
   //  - edit: 마지막 assistant 응답(들) + 마지막 user 메시지 삭제 (수정본으로 대체)
+  // 이 재정리(이전 턴 삭제)는 반드시 아래 6)의 새 user 저장보다 먼저 끝나야 한다.
+  // 병렬(fire-and-forget)로 두면 edit 모드에서 재정리의 SELECT가 방금 넣은 새 user
+  // 메시지를 함께 읽어 지워버리는 경쟁이 생긴다. edit/regenerate는 드물고 일반 대화
+  // 경로에선 실행되지 않으므로, 여기서 await 해도 체감 응답 지연(TTFT)엔 영향이 없다.
   if (supabase && conversationId && mode !== "normal") {
     try {
       const { data: tail } = await supabase
@@ -287,20 +319,22 @@ export async function POST(req: Request): Promise<Response> {
   //    재생성 모드에서는 같은 질문이 이미 저장돼 있으므로 건너뛴다.
   const nowIso = () => new Date().toISOString();
   if (supabase && conversationId && lastRaw?.role === "user" && mode !== "regenerate") {
-    try {
-      await supabase.from("messages").insert({
-        conversation_id: conversationId,
-        role: "user",
-        content: lastText,
-        attachments: attachmentMeta(lastRaw.attachments),
-      });
-      await supabase
-        .from("conversations")
-        .update({ updated_at: nowIso() })
-        .eq("id", conversationId);
-    } catch (err) {
-      console.error("[api/chat] user message save error:", err);
-    }
+    void (async () => {
+      try {
+        await supabase.from("messages").insert({
+          conversation_id: conversationId,
+          role: "user",
+          content: lastText,
+          attachments: attachmentMeta(lastRaw.attachments),
+        });
+        await supabase
+          .from("conversations")
+          .update({ updated_at: nowIso() })
+          .eq("id", conversationId);
+      } catch (err) {
+        console.error("[api/chat] user message save error:", err);
+      }
+    })();
   }
 
   // 7) provider 선택 후 스트림. 동시에 전체 텍스트를 누적해 종료 시 assistant 저장.

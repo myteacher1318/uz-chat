@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
 import {
   ACCEPT,
@@ -30,10 +30,12 @@ type UIAttachment = {
 };
 
 type Message = {
+  id: string;
   role: "user" | "assistant";
   content: string;
   attachments?: UIAttachment[];
   error?: boolean;
+  streaming?: boolean;
 };
 
 function fileToBase64(file: File): Promise<string> {
@@ -137,6 +139,7 @@ export default function ChatClient() {
       }[];
       setMessages(
         rows.map((r) => ({
+          id: crypto.randomUUID(),
           role: r.role,
           content: r.content,
           attachments: Array.isArray(r.attachments)
@@ -303,10 +306,48 @@ export default function ChatClient() {
   ) {
     setLoading(true);
     stickToBottom.current = true; // 전송 시엔 항상 바닥으로
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    const assistantId = crypto.randomUUID();
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantId, role: "assistant", content: "", streaming: true },
+    ]);
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    let rafId: number | null = null;
+    let buffered = "";
+
+    const applyBuffered = (finalize: boolean) => {
+      const delta = buffered;
+      buffered = "";
+      setMessages((prev) => {
+        const copy = [...prev];
+        let idx = -1;
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i]?.id === assistantId) {
+            idx = i;
+            break;
+          }
+        }
+        if (idx < 0) return prev;
+        const cur = copy[idx];
+        copy[idx] = {
+          ...cur,
+          content: cur.content + delta,
+          streaming: finalize ? false : cur.streaming,
+        };
+        return copy;
+      });
+    };
+
+    const scheduleFlush = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (buffered) applyBuffered(false);
+      });
+    };
 
     try {
       const res = await fetch("/api/chat", {
@@ -353,34 +394,62 @@ export default function ChatClient() {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        setMessages((prev) => {
-          const copy = [...prev];
-          const lastIdx = copy.length - 1;
-          copy[lastIdx] = {
-            ...copy[lastIdx],
-            content: copy[lastIdx].content + chunk,
-          };
-          return copy;
-        });
+        buffered += chunk;
+        scheduleFlush();
       }
+
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      applyBuffered(true);
     } catch (err) {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
       if (err instanceof DOMException && err.name === "AbortError") {
         // 사용자가 중지 — 부분 응답은 그대로 두고, 아무것도 못 받았으면 말풍선 제거
         setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.role === "assistant" && last.content === "") {
-            return prev.slice(0, -1);
+          const copy = [...prev];
+          let idx = -1;
+          for (let i = copy.length - 1; i >= 0; i--) {
+            if (copy[i]?.id === assistantId) {
+              idx = i;
+              break;
+            }
           }
-          return prev;
+          if (idx < 0) return prev;
+          const cur = copy[idx];
+          const nextContent = cur.content + buffered;
+          buffered = "";
+          if (cur.role === "assistant" && nextContent === "") {
+            copy.splice(idx, 1);
+            return copy;
+          }
+          copy[idx] = { ...cur, content: nextContent, streaming: false };
+          return copy;
         });
       } else {
         const msg = err instanceof Error ? err.message : "오류가 발생했습니다.";
         setMessages((prev) => {
           const copy = [...prev];
-          copy[copy.length - 1] = {
+          let idx = -1;
+          for (let i = copy.length - 1; i >= 0; i--) {
+            if (copy[i]?.id === assistantId) {
+              idx = i;
+              break;
+            }
+          }
+          if (idx < 0) return prev;
+          const cur = copy[idx];
+          buffered = "";
+          copy[idx] = {
+            ...cur,
             role: "assistant",
             content: `⚠️ ${msg}`,
             error: true,
+            streaming: false,
           };
           return copy;
         });
@@ -421,6 +490,7 @@ export default function ChatClient() {
     }
 
     const userMsg: Message = {
+      id: crypto.randomUUID(),
       role: "user",
       content: text,
       attachments: pending.length ? pending : undefined,
@@ -644,7 +714,7 @@ export default function ChatClient() {
 
             {messages.map((m, i) => (
               <MessageBubble
-                key={i}
+                key={m.id}
                 message={m}
                 onEdit={
                   !loading && !editPending && m.role === "user" && i === lastUserIndex
@@ -870,7 +940,7 @@ export default function ChatClient() {
   );
 }
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
   onEdit,
   onRegenerate,
@@ -914,7 +984,7 @@ function MessageBubble({
           </div>
         )}
         {message.content &&
-          (isUser || message.error ? (
+          (isUser || message.error || message.streaming ? (
             <div className="whitespace-pre-wrap">{message.content}</div>
           ) : (
             <Markdown content={message.content} />
@@ -958,7 +1028,7 @@ function MessageBubble({
       )}
     </div>
   );
-}
+});
 
 function AttachmentPreview({ att }: { att: UIAttachment }) {
   const isImage = att.mediaType.startsWith("image/");
