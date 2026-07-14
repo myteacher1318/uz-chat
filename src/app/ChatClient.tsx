@@ -77,6 +77,11 @@ export default function ChatClient() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+  // 이중 전송 방지 — loading은 React 상태라 streamTurn 안에서 비동기로 켜진다.
+  // 그 사이(대화 생성 await 등) 두 번째 트리거가 stale한 loading=false를 보고
+  // 통과하면 질문·답변·DB 저장이 2번씩 일어난다. ref는 동기적으로 즉시 읽혀
+  // 이 경쟁을 막는다. (Enter 연타·더블클릭·한글 IME 중복 keydown 대비)
+  const sendingRef = useRef(false);
 
   // 첫 로드: 대화 목록을 불러와 가장 최근 대화를 자동 선택
   useEffect(() => {
@@ -465,51 +470,56 @@ export default function ChatClient() {
 
   // ── 전송 ──────────────────────────────────────
   async function send() {
+    if (sendingRef.current) return; // 이미 전송 처리 중 — 이중 전송 차단(동기)
     const text = input.trim();
     const uploadingNow = pending.some((p) => p.uploading);
     if ((text === "" && pending.length === 0) || loading || uploadingNow) return;
-
-    // 1) 대화 확보 — 없으면 새로 생성 (실패해도 채팅은 진행, 저장만 생략)
-    let convId = activeConversationId;
-    if (!convId) {
-      try {
-        const res = await fetch("/api/conversations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ firstMessage: text }),
-        });
-        if (res.ok) {
-          const conv = (await res.json()) as { id: string };
-          convId = conv.id;
-          setActiveConversationId(convId);
-          void refreshConversations();
+    sendingRef.current = true;
+    try {
+      // 1) 대화 확보 — 없으면 새로 생성 (실패해도 채팅은 진행, 저장만 생략)
+      let convId = activeConversationId;
+      if (!convId) {
+        try {
+          const res = await fetch("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ firstMessage: text }),
+          });
+          if (res.ok) {
+            const conv = (await res.json()) as { id: string };
+            convId = conv.id;
+            setActiveConversationId(convId);
+            void refreshConversations();
+          }
+        } catch {
+          /* Supabase 미설정 등 — 저장 없이 진행 */
         }
-      } catch {
-        /* Supabase 미설정 등 — 저장 없이 진행 */
       }
+
+      const userMsg: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text,
+        attachments: pending.length ? pending : undefined,
+      };
+      const nextMessages: Message[] = [...messages, userMsg];
+
+      setMessages(nextMessages);
+      setInput("");
+      setPending([]);
+      setAttachError(null);
+
+      const mode = editPending ? "edit" : "normal";
+      setEditPending(false);
+      await streamTurn(convId, nextMessages, mode);
+    } finally {
+      sendingRef.current = false;
     }
-
-    const userMsg: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: text,
-      attachments: pending.length ? pending : undefined,
-    };
-    const nextMessages: Message[] = [...messages, userMsg];
-
-    setMessages(nextMessages);
-    setInput("");
-    setPending([]);
-    setAttachError(null);
-
-    const mode = editPending ? "edit" : "normal";
-    setEditPending(false);
-    await streamTurn(convId, nextMessages, mode);
   }
 
   // 마지막 assistant 응답을 버리고 같은 질문으로 다시 생성
   async function regenerate() {
-    if (loading) return;
+    if (sendingRef.current || loading) return; // 이중 실행 차단(동기)
     const history = [...messages];
     while (history.length && history[history.length - 1].role === "assistant") {
       history.pop();
@@ -517,8 +527,13 @@ export default function ChatClient() {
     if (history.length === 0 || history[history.length - 1].role !== "user") {
       return;
     }
-    setMessages(history);
-    await streamTurn(activeConversationId, history, "regenerate");
+    sendingRef.current = true;
+    try {
+      setMessages(history);
+      await streamTurn(activeConversationId, history, "regenerate");
+    } finally {
+      sendingRef.current = false;
+    }
   }
 
   // 마지막 사용자 메시지를 입력창으로 되돌려 수정 후 재전송.
