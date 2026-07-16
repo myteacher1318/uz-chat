@@ -5,10 +5,7 @@
       "name": "uz-chat-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 3000,
-      "env": {
-        "NODE_TLS_REJECT_UNAUTHORIZED": "0"
-      }
+      "port": 3000
     }
   ]
 }
