@@ -50,6 +50,33 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+// /api/messages 가 돌려주는 행
+type MessageRow = {
+  role: "user" | "assistant";
+  content: string;
+  attachments: { name: string; type: string; fileId?: string }[] | null;
+  created_at: string;
+};
+
+function rowsToMessages(rows: MessageRow[]): Message[] {
+  return rows.map((r) => ({
+    id: crypto.randomUUID(),
+    role: r.role,
+    content: r.content,
+    attachments: Array.isArray(r.attachments)
+      ? r.attachments.map((a) => ({
+          id: crypto.randomUUID(),
+          name: a.name,
+          mediaType: a.type,
+          size: 0,
+          // Files API 첨부는 fileId를 복원해 새로고침 후에도
+          // 후속 질문에서 파일 문맥이 유지되게 한다.
+          fileId: typeof a.fileId === "string" ? a.fileId : undefined,
+        }))
+      : undefined,
+  }));
+}
+
 export default function ChatClient() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(
@@ -69,6 +96,9 @@ export default function ChatClient() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // 긴 대화는 최근 페이지만 렌더링하고, 위쪽은 버튼으로 이어 불러온다.
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -77,6 +107,11 @@ export default function ChatClient() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+  // 화면에 로드된 가장 오래된 메시지의 created_at — '이전 대화 더 보기' 커서
+  const oldestCursor = useRef<string | null>(null);
+  // 메시지 로드 세대 — 대화를 바꾸면 증가시켜, 뒤늦게 도착한 이전 대화의
+  // 응답이 현재 화면을 덮어쓰지 않게 한다.
+  const loadSeq = useRef(0);
   // 이중 전송 방지 — loading은 React 상태라 streamTurn 안에서 비동기로 켜진다.
   // 그 사이(대화 생성 await 등) 두 번째 트리거가 stale한 loading=false를 보고
   // 통과하면 질문·답변·DB 저장이 2번씩 일어난다. ref는 동기적으로 즉시 읽혀
@@ -129,43 +164,75 @@ export default function ChatClient() {
   }
 
   async function loadMessages(conversationId: string) {
+    const seq = ++loadSeq.current;
     try {
       const res = await fetch(
         `/api/messages?conversationId=${encodeURIComponent(conversationId)}`,
       );
+      if (seq !== loadSeq.current) return; // 그 사이 다른 대화로 이동함
       if (!res.ok) {
         setMessages([]);
+        setHasMoreOlder(false);
         return;
       }
-      const rows = (await res.json()) as {
-        role: "user" | "assistant";
-        content: string;
-        attachments: { name: string; type: string; fileId?: string }[] | null;
-      }[];
-      setMessages(
-        rows.map((r) => ({
-          id: crypto.randomUUID(),
-          role: r.role,
-          content: r.content,
-          attachments: Array.isArray(r.attachments)
-            ? r.attachments.map((a) => ({
-                id: crypto.randomUUID(),
-                name: a.name,
-                mediaType: a.type,
-                size: 0,
-                // Files API 첨부는 fileId를 복원해 새로고침 후에도
-                // 후속 질문에서 파일 문맥이 유지되게 한다.
-                fileId: typeof a.fileId === "string" ? a.fileId : undefined,
-              }))
-            : undefined,
-        })),
-      );
+      const { messages: rows, hasMore } = (await res.json()) as {
+        messages: MessageRow[];
+        hasMore: boolean;
+      };
+      if (seq !== loadSeq.current) return;
+      oldestCursor.current = rows[0]?.created_at ?? null;
+      setHasMoreOlder(hasMore);
+      stickToBottom.current = true; // 대화를 열면 마지막 메시지로
+      setMessages(rowsToMessages(rows));
     } catch {
-      setMessages([]);
+      if (seq === loadSeq.current) {
+        setMessages([]);
+        setHasMoreOlder(false);
+      }
+    }
+  }
+
+  // 위쪽(과거) 메시지 한 페이지를 이어 붙인다 — 보던 스크롤 위치는 유지.
+  async function loadOlderMessages() {
+    const convId = activeConversationId;
+    const cursor = oldestCursor.current;
+    if (!convId || !cursor || loadingOlder) return;
+    const seq = loadSeq.current;
+    setLoadingOlder(true);
+    const el = mainRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    try {
+      const res = await fetch(
+        `/api/messages?conversationId=${encodeURIComponent(convId)}&before=${encodeURIComponent(cursor)}`,
+      );
+      if (seq !== loadSeq.current || !res.ok) return;
+      const { messages: rows, hasMore } = (await res.json()) as {
+        messages: MessageRow[];
+        hasMore: boolean;
+      };
+      if (seq !== loadSeq.current) return;
+      setHasMoreOlder(hasMore);
+      if (rows.length > 0) {
+        oldestCursor.current = rows[0]?.created_at ?? null;
+        setMessages((prev) => [...rowsToMessages(rows), ...prev]);
+        // 프리펜드된 높이만큼 스크롤을 보정해 읽던 위치를 지킨다.
+        requestAnimationFrame(() => {
+          const m = mainRef.current;
+          if (m) m.scrollTop = prevTop + (m.scrollHeight - prevHeight);
+        });
+      }
+    } catch {
+      /* 실패해도 무해 — 버튼을 다시 누르면 재시도 */
+    } finally {
+      setLoadingOlder(false);
     }
   }
 
   function newConversation() {
+    loadSeq.current += 1; // 진행 중이던 이전 대화 로드를 무효화
+    oldestCursor.current = null;
+    setHasMoreOlder(false);
     setActiveConversationId(null);
     setMessages([]);
     setPending([]);
@@ -200,6 +267,9 @@ export default function ChatClient() {
         setActiveConversationId(list[0].id);
         void loadMessages(list[0].id);
       } else {
+        loadSeq.current += 1;
+        oldestCursor.current = null;
+        setHasMoreOlder(false);
         setActiveConversationId(null);
         setMessages([]);
       }
@@ -321,7 +391,13 @@ export default function ChatClient() {
     abortRef.current = controller;
 
     let rafId: number | null = null;
+    let flushTimer: number | null = null;
+    let lastFlushAt = 0;
     let buffered = "";
+    // 토큰 반영 주기 — 매 프레임(초당 60회) 대신 이 간격으로 묶어 반영한다.
+    // 답변이 길어질수록 말풍선 레이아웃 비용이 커지는데, 반영 횟수를 줄이면
+    // 그 비용이 1/6로 떨어져 스트리밍 중에도 화면이 매끄럽게 유지된다.
+    const FLUSH_INTERVAL_MS = 100;
 
     const applyBuffered = (finalize: boolean) => {
       const delta = buffered;
@@ -346,12 +422,28 @@ export default function ChatClient() {
       });
     };
 
-    const scheduleFlush = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
+    const cancelScheduledFlush = () => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
         rafId = null;
-        if (buffered) applyBuffered(false);
-      });
+      }
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer !== null || rafId !== null) return;
+      const wait = Math.max(0, FLUSH_INTERVAL_MS - (Date.now() - lastFlushAt));
+      flushTimer = window.setTimeout(() => {
+        flushTimer = null;
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          lastFlushAt = Date.now();
+          if (buffered) applyBuffered(false);
+        });
+      }, wait);
     };
 
     try {
@@ -403,16 +495,10 @@ export default function ChatClient() {
         scheduleFlush();
       }
 
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
+      cancelScheduledFlush();
       applyBuffered(true);
     } catch (err) {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
+      cancelScheduledFlush();
       if (err instanceof DOMException && err.name === "AbortError") {
         // 사용자가 중지 — 부분 응답은 그대로 두고, 아무것도 못 받았으면 말풍선 제거
         setMessages((prev) => {
@@ -724,6 +810,19 @@ export default function ChatClient() {
                 <p className="mt-1 text-sm">
                   Claude 기반 한국어 어시스턴트입니다. 이미지·PDF를 끌어다 놓아 보세요.
                 </p>
+              </div>
+            )}
+
+            {hasMoreOlder && (
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => void loadOlderMessages()}
+                  disabled={loadingOlder}
+                  className="rounded-full border border-black/[.1] px-4 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-black/[.04] disabled:opacity-50 dark:border-white/[.15] dark:text-zinc-400 dark:hover:bg-white/[.06]"
+                >
+                  {loadingOlder ? "불러오는 중…" : "↑ 이전 대화 더 보기"}
+                </button>
               </div>
             )}
 
