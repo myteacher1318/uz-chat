@@ -45,14 +45,12 @@ export default function Gate() {
         onSubmit={submit}
         className="flex w-full max-w-xs flex-col items-center gap-4"
       >
-        <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-foreground text-2xl font-bold text-background">
-          U
+        <span className="flex h-14 w-14 select-none items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-strong text-xl font-bold text-white shadow-[0_2px_8px_rgba(0,0,0,0.15)]">
+          UZ
         </span>
         <div className="text-center">
-          <h1 className="text-lg font-semibold">UZ Chat</h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            접속 코드를 입력하세요
-          </p>
+          <h1 className="text-lg font-semibold tracking-tight">UZ Chat</h1>
+          <p className="mt-1 text-sm text-muted">접속 코드를 입력하세요</p>
         </div>
         <input
           type="password"
@@ -61,13 +59,13 @@ export default function Gate() {
           onChange={(e) => setCode(e.target.value)}
           placeholder="접속 코드"
           autoFocus
-          className="w-full rounded-xl border border-black/[.1] bg-transparent px-4 py-3 text-center text-lg tracking-[0.3em] outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
+          className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-center text-lg tracking-[0.3em] shadow-[0_1px_2px_rgba(0,0,0,0.04)] outline-none transition-colors focus:border-accent/60"
         />
         {err && <p className="text-sm text-red-500">{err}</p>}
         <button
           type="submit"
           disabled={loading || code.trim().length === 0}
-          className="w-full rounded-xl bg-foreground px-4 py-3 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="w-full rounded-xl bg-accent px-4 py-3 text-sm font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {loading ? "확인 중…" : "입장"}
         </button>

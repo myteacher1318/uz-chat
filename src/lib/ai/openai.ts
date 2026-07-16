@@ -10,8 +10,9 @@ export interface StreamOptions {
   // Anthropic 전용 옵션 — OpenAI 경로에서는 무시된다 (인터페이스 호환용)
   thinking?: boolean;
   effort?: "low" | "medium" | "high";
-  webSearch?: boolean;
   cache?: boolean;
+  // 웹 검색 도구 사용 여부 — Responses API의 web_search 서버 도구.
+  webSearch?: boolean;
   // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
   onUsage?: (u: { input: number; output: number }) => void;
 }
@@ -30,32 +31,30 @@ function getClient(): OpenAI {
   return client;
 }
 
-// 중립 메시지 → OpenAI Chat Completions 메시지
-function toOpenAIMessage(
-  m: NeutralMessage,
-): OpenAI.Chat.Completions.ChatCompletionMessageParam {
+// 중립 메시지 → Responses API 입력 메시지.
+// (GPT-5.6부터 웹 검색 등 서버 도구는 Responses API에서만 지원되어 이전함)
+function toResponseMessage(m: NeutralMessage): OpenAI.Responses.ResponseInputItem {
   if (m.role === "assistant") return { role: "assistant", content: m.text };
 
-  const parts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
+  const parts: OpenAI.Responses.ResponseInputMessageContentList = [];
   for (const a of m.attachments) {
     // OpenAI는 Anthropic Files API의 file_id를 쓸 수 없으므로 인라인(base64)만 지원.
     if (a.kind !== "inline" || !a.data) continue;
     if (isImageMediaType(a.mediaType)) {
       parts.push({
-        type: "image_url",
-        image_url: { url: `data:${a.mediaType};base64,${a.data}` },
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:${a.mediaType};base64,${a.data}`,
       });
     } else if (a.mediaType === "application/pdf") {
       parts.push({
-        type: "file",
-        file: {
-          filename: a.name,
-          file_data: `data:application/pdf;base64,${a.data}`,
-        },
+        type: "input_file",
+        filename: a.name,
+        file_data: `data:application/pdf;base64,${a.data}`,
       });
     }
   }
-  if (m.text) parts.push({ type: "text", text: m.text });
+  if (m.text) parts.push({ type: "input_text", text: m.text });
   if (parts.length === 0) return { role: "user", content: m.text };
   return { role: "user", content: parts };
 }
@@ -66,34 +65,33 @@ export async function* streamOpenAI({
   system,
   messages,
   maxTokens,
+  webSearch,
   onUsage,
 }: StreamOptions): AsyncGenerator<string> {
   const openai = getClient();
 
-  const oaiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: "system", content: system },
-    ...messages.map(toOpenAIMessage),
-  ];
-
-  const stream = await openai.chat.completions.create({
+  const stream = await openai.responses.create({
     model,
-    max_completion_tokens: maxTokens,
-    messages: oaiMessages,
+    instructions: system,
+    input: messages.map(toResponseMessage),
+    max_output_tokens: maxTokens,
     stream: true,
-    // 마지막 청크에 usage 를 포함시켜 토큰 사용량을 받는다.
-    stream_options: { include_usage: true },
+    // 대화 저장은 Supabase가 담당 — OpenAI 서버에는 응답을 남기지 않는다.
+    store: false,
+    // 웹 검색 서버 도구 — 선언만 하면 모델이 필요할 때 알아서 검색한다.
+    ...(webSearch ? { tools: [{ type: "web_search" as const }] } : {}),
   });
 
   let inputTokens = 0;
   let outputTokens = 0;
 
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content;
-    if (delta) yield delta;
-    // usage 는 보통 choices 가 빈 마지막 청크에 실려 온다.
-    if (chunk.usage) {
-      inputTokens = chunk.usage.prompt_tokens ?? inputTokens;
-      outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+  for await (const event of stream) {
+    if (event.type === "response.output_text.delta") {
+      yield event.delta;
+    } else if (event.type === "response.completed") {
+      const u = event.response.usage;
+      inputTokens = u?.input_tokens ?? inputTokens;
+      outputTokens = u?.output_tokens ?? outputTokens;
     }
   }
 

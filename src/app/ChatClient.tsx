@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, startTransition, useEffect, useRef, useState } from "react";
 import { upload } from "@vercel/blob/client";
 import {
   ACCEPT,
@@ -87,7 +87,8 @@ export default function ChatClient() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [model, setModel] = useState<string>(MODELS[0].id);
-  const [webSearch, setWebSearch] = useState(false);
+  // 웹 검색은 기본 켬 — 아래 토글 버튼으로 끌 수 있다 (Claude·GPT 모두 지원)
+  const [webSearch, setWebSearch] = useState(true);
   const [depth, setDepth] = useState<ThinkingDepth>(DEFAULT_THINKING_DEPTH);
   const [editPending, setEditPending] = useState(false); // 다음 전송이 '마지막 턴 수정'인지
   const [pending, setPending] = useState<UIAttachment[]>([]);
@@ -496,7 +497,9 @@ export default function ChatClient() {
       }
 
       cancelScheduledFlush();
-      applyBuffered(true);
+      // 마무리 커밋은 답변 전체의 마크다운 파싱을 유발한다 — transition으로
+      // 낮은 우선순위 처리해 긴 답변에서도 입력·스크롤이 막히지 않게 한다.
+      startTransition(() => applyBuffered(true));
     } catch (err) {
       cancelScheduledFlush();
       if (err instanceof DOMException && err.name === "AbortError") {
@@ -707,7 +710,7 @@ export default function ChatClient() {
       {/* 모바일 백드롭 */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-10 bg-black/30 md:hidden"
+          className="fixed inset-0 z-10 bg-black/40 md:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -715,7 +718,7 @@ export default function ChatClient() {
       {/* 사이드바 */}
       <aside
         className={[
-          "fixed inset-y-0 left-0 z-20 flex w-64 transform flex-col border-r border-black/[.08] bg-background transition-transform md:static md:z-auto md:translate-x-0 dark:border-white/[.12]",
+          "fixed inset-y-0 left-0 z-20 flex w-64 transform flex-col border-r border-line bg-surface shadow-xl transition-transform md:static md:z-auto md:translate-x-0 md:shadow-none",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
         ].join(" ")}
       >
@@ -723,14 +726,17 @@ export default function ChatClient() {
           <button
             type="button"
             onClick={newConversation}
-            className="w-full rounded-lg border border-black/[.1] px-3 py-2 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.15] dark:hover:bg-white/[.06]"
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-line bg-raised px-3 py-2.5 text-sm font-medium shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-colors hover:border-accent/40 hover:text-accent"
           >
-            + 새 대화
+            <IconPlus />새 대화
           </button>
         </div>
-        <nav className="flex-1 overflow-y-auto px-2 pb-3">
+        <p className="px-5 pb-1.5 text-[11px] font-medium tracking-wider text-muted/80">
+          대화 목록
+        </p>
+        <nav className="nice-scroll flex-1 overflow-y-auto px-2 pb-3">
           {conversations.length === 0 ? (
-            <p className="px-2 py-4 text-center text-xs text-zinc-400">
+            <p className="px-2 py-4 text-center text-xs text-muted/70">
               대화가 없습니다
             </p>
           ) : (
@@ -741,10 +747,10 @@ export default function ChatClient() {
                   <li
                     key={c.id}
                     className={[
-                      "group flex items-center rounded-lg",
+                      "group flex items-center rounded-lg transition-colors",
                       active
-                        ? "bg-black/[.06] dark:bg-white/[.1]"
-                        : "hover:bg-black/[.03] dark:hover:bg-white/[.05]",
+                        ? "bg-accent-soft text-foreground"
+                        : "text-foreground/75 hover:bg-foreground/[.05] hover:text-foreground",
                     ].join(" ")}
                   >
                     <button
@@ -760,9 +766,9 @@ export default function ChatClient() {
                       onClick={() => setDeleteTarget(c)}
                       aria-label="대화 삭제"
                       title="삭제"
-                      className="mr-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:bg-black/[.06] hover:text-red-500 group-hover:flex dark:hover:bg-white/[.1]"
+                      className="mr-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted hover:bg-foreground/[.06] hover:text-red-500 group-hover:flex"
                     >
-                      🗑
+                      <IconTrash />
                     </button>
                   </li>
                 );
@@ -781,34 +787,41 @@ export default function ChatClient() {
         onDrop={onDrop}
       >
         {/* 헤더 */}
-        <header className="flex items-center gap-2 border-b border-black/[.08] px-4 py-3 dark:border-white/[.12]">
+        <header className="flex items-center gap-2.5 border-b border-line px-4 py-3">
           <button
             type="button"
             onClick={() => setSidebarOpen((v) => !v)}
             aria-label="대화 목록"
-            className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-black/[.06] md:hidden dark:hover:bg-white/[.1]"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground md:hidden"
           >
-            ☰
+            <IconMenu />
           </button>
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-foreground text-sm font-bold text-background">
+          <span className="flex h-7 w-7 select-none items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-strong text-[11px] font-bold text-white shadow-[0_1px_3px_rgba(0,0,0,0.12)]">
             UZ
           </span>
-          <h1 className="text-base font-semibold tracking-tight">
-            UZ Chat
-            <span className="ml-1 font-normal text-zinc-500 dark:text-zinc-400">
-              : 우찌 전용
-            </span>
-          </h1>
+          <h1 className="text-[15px] font-semibold tracking-tight">UZ Chat</h1>
+          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
+            우찌 전용
+          </span>
         </header>
 
         {/* 메시지 영역 */}
-        <main ref={mainRef} onScroll={onMainScroll} className="flex-1 overflow-y-auto">
-          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
+        <main
+          ref={mainRef}
+          onScroll={onMainScroll}
+          className="nice-scroll flex-1 overflow-y-auto"
+        >
+          <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-8">
             {isEmpty && (
-              <div className="mt-24 text-center text-zinc-500 dark:text-zinc-400">
-                <p className="text-lg font-medium">무엇이든 물어보세요</p>
-                <p className="mt-1 text-sm">
-                  Claude 기반 한국어 어시스턴트입니다. 이미지·PDF를 끌어다 놓아 보세요.
+              <div className="mt-24 flex flex-col items-center text-center">
+                <span className="flex h-12 w-12 select-none items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-strong text-lg font-bold text-white shadow-[0_2px_8px_rgba(0,0,0,0.12)]">
+                  UZ
+                </span>
+                <p className="mt-5 text-2xl font-semibold tracking-tight">
+                  무엇이든 물어보세요
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  Claude 기반 한국어 어시스턴트 · 이미지·PDF를 끌어다 놓아 보세요
                 </p>
               </div>
             )}
@@ -819,7 +832,7 @@ export default function ChatClient() {
                   type="button"
                   onClick={() => void loadOlderMessages()}
                   disabled={loadingOlder}
-                  className="rounded-full border border-black/[.1] px-4 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-black/[.04] disabled:opacity-50 dark:border-white/[.15] dark:text-zinc-400 dark:hover:bg-white/[.06]"
+                  className="rounded-full border border-line bg-raised px-4 py-1.5 text-xs text-muted transition-colors hover:text-accent disabled:opacity-50"
                 >
                   {loadingOlder ? "불러오는 중…" : "↑ 이전 대화 더 보기"}
                 </button>
@@ -851,10 +864,8 @@ export default function ChatClient() {
               messages.length > 0 &&
               messages[messages.length - 1].role === "assistant" &&
               messages[messages.length - 1].content === "" && (
-                <div className="flex justify-start">
-                  <div className="rounded-2xl bg-black/[.04] px-4 py-3 dark:bg-white/[.06]">
-                    <TypingDots />
-                  </div>
+                <div className="flex justify-start py-1">
+                  <TypingDots />
                 </div>
               )}
 
@@ -863,109 +874,40 @@ export default function ChatClient() {
         </main>
 
         {/* 입력 영역 */}
-        <footer className="border-t border-black/[.08] px-4 py-3 dark:border-white/[.12]">
+        <footer className="px-4 pb-4 pt-1">
           <div className="mx-auto max-w-3xl">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  모델
-                  <select
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
-                  >
-                    {MODELS.map((m) => (
-                      <option key={m.id} value={m.id} className="text-black">
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {supportsDepth && (
-                  <label
-                    className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400"
-                    title="빠르게: 사고 없이 최소 지연 · 표준·깊게: 필요할 때 더 신중히 사고합니다"
-                  >
-                    사고 깊이
-                    <select
-                      value={depth}
-                      onChange={(e) => setDepth(e.target.value as ThinkingDepth)}
-                      className="rounded-md border border-black/[.1] bg-transparent px-2 py-1 text-xs text-foreground outline-none focus:border-black/30 dark:border-white/[.15] dark:focus:border-white/40"
-                    >
-                      {THINKING_DEPTHS.map((d) => (
-                        <option key={d.id} value={d.id} className="text-black">
-                          {d.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {isAnthropic && (
-                  <button
-                    type="button"
-                    onClick={() => setWebSearch((v) => !v)}
-                    aria-pressed={webSearch}
-                    title="켜면 Claude가 필요할 때 웹을 검색해 답합니다"
-                    className={[
-                      "rounded-md border px-2 py-1 text-xs transition-colors",
-                      webSearch
-                        ? "border-blue-500/60 bg-blue-500/10 text-blue-600 dark:text-blue-400"
-                        : "border-black/[.1] text-zinc-500 hover:bg-black/[.04] dark:border-white/[.15] dark:text-zinc-400 dark:hover:bg-white/[.06]",
-                    ].join(" ")}
-                  >
-                    🌐 웹 검색{webSearch ? " 켬" : ""}
-                  </button>
-                )}
-              </div>
-              {attachError ? (
-                <span className="truncate text-xs text-red-500">{attachError}</span>
-              ) : gptFileWarning ? (
-                <span className="truncate text-xs text-amber-600 dark:text-amber-400">
-                  GPT 모델은 2MB 초과 첨부를 읽지 못합니다
-                </span>
-              ) : null}
-            </div>
-
-            {pending.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-2">
-                {pending.map((a) => (
-                  <div key={a.id} className="relative">
-                    <AttachmentPreview att={a} />
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(a.id)}
-                      aria-label="첨부 제거"
-                      className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-xs text-white shadow hover:bg-zinc-700 dark:bg-zinc-200 dark:text-black"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
+            {(attachError || gptFileWarning) && (
+              <p
+                className={[
+                  "mb-1.5 px-2 text-xs",
+                  attachError
+                    ? "text-red-500"
+                    : "text-amber-600 dark:text-amber-400",
+                ].join(" ")}
+              >
+                {attachError ?? "GPT 모델은 2MB 초과 첨부를 읽지 못합니다"}
+              </p>
             )}
 
-            <div className="flex items-end gap-2">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={loading}
-                aria-label="파일 첨부"
-                title="파일 첨부 (이미지·PDF)"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-black/[.1] text-lg transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]"
-              >
-                📎
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={ACCEPT}
-                multiple
-                hidden
-                onChange={(e) => {
-                  if (e.target.files) void addFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
+            <div className="rounded-2xl border border-line bg-raised shadow-[0_2px_16px_rgba(0,0,0,0.05)] transition-colors focus-within:border-foreground/25">
+              {pending.length > 0 && (
+                <div className="flex flex-wrap gap-2 px-3 pt-3">
+                  {pending.map((a) => (
+                    <div key={a.id} className="relative">
+                      <AttachmentPreview att={a} />
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(a.id)}
+                        aria-label="첨부 제거"
+                        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-foreground text-xs text-background shadow transition-opacity hover:opacity-80"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -973,38 +915,120 @@ export default function ChatClient() {
                 onKeyDown={onKeyDown}
                 disabled={loading}
                 rows={1}
-                placeholder="메시지를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"
-                className="max-h-[200px] flex-1 resize-none rounded-2xl border border-black/[.1] bg-transparent px-4 py-3 text-[15px] leading-6 outline-none placeholder:text-zinc-400 focus:border-black/30 disabled:opacity-60 dark:border-white/[.15] dark:focus:border-white/40"
+                placeholder="무엇이든 물어보세요"
+                className="max-h-[200px] w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-6 outline-none placeholder:text-muted/60 disabled:opacity-60"
               />
-              {loading ? (
+
+              <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
                 <button
                   type="button"
-                  onClick={stopGenerating}
-                  aria-label="응답 중지"
-                  className="h-11 shrink-0 rounded-2xl border border-black/[.15] px-5 text-sm font-medium transition-colors hover:bg-black/[.04] dark:border-white/[.2] dark:hover:bg-white/[.06]"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={loading}
+                  aria-label="파일 첨부"
+                  title="파일 첨부 (이미지·PDF)"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground disabled:opacity-40"
                 >
-                  ■ 중지
+                  <IconPaperclip />
                 </button>
-              ) : (
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ACCEPT}
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    if (e.target.files) void addFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  aria-label="모델 선택"
+                  className="h-8 max-w-44 rounded-lg bg-transparent px-1.5 text-xs text-muted outline-none transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+                >
+                  {MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+
+                {supportsDepth && (
+                  <select
+                    value={depth}
+                    onChange={(e) => setDepth(e.target.value as ThinkingDepth)}
+                    aria-label="사고 깊이"
+                    title="빠르게: 사고 없이 최소 지연 · 표준·깊게: 필요할 때 더 신중히 사고합니다"
+                    className="h-8 rounded-lg bg-transparent px-1.5 text-xs text-muted outline-none transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+                  >
+                    {THINKING_DEPTHS.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => void send()}
-                  disabled={!canSend}
-                  className="h-11 shrink-0 rounded-2xl bg-foreground px-5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+                  onClick={() => setWebSearch((v) => !v)}
+                  aria-pressed={webSearch}
+                  title={
+                    webSearch
+                      ? "웹 검색 켜짐 — 필요할 때 웹을 검색해 답합니다. 누르면 꺼집니다"
+                      : "웹 검색 꺼짐 — 누르면 켜집니다"
+                  }
+                  className={[
+                    "flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs transition-colors",
+                    webSearch
+                      ? "bg-accent-soft font-medium text-accent"
+                      : "text-muted hover:bg-foreground/[.05] hover:text-foreground",
+                  ].join(" ")}
                 >
-                  {uploading ? "업로드 중" : "전송"}
+                  <IconGlobe />웹 검색
                 </button>
-              )}
+
+                <div className="ml-auto pl-1">
+                  {loading ? (
+                    <button
+                      type="button"
+                      onClick={stopGenerating}
+                      aria-label="응답 중지"
+                      title="응답 중지"
+                      className="flex h-9 w-9 items-center justify-center rounded-full border border-line text-foreground transition-colors hover:bg-foreground/[.05]"
+                    >
+                      <IconStop />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void send()}
+                      disabled={!canSend}
+                      aria-label="전송"
+                      title={uploading ? "업로드 중…" : "전송"}
+                      className="flex h-9 w-9 items-center justify-center rounded-full bg-accent text-white shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-colors hover:bg-accent-strong disabled:opacity-35 disabled:shadow-none"
+                    >
+                      {uploading ? <IconSpinner /> : <IconArrowUp />}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
+
+            <p className="mt-2 hidden text-center text-[11px] text-muted/60 sm:block">
+              Enter 전송 · Shift+Enter 줄바꿈
+            </p>
           </div>
         </footer>
 
         {/* 드롭 오버레이 */}
         {dragActive && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-foreground/5 backdrop-blur-sm">
-            <div className="rounded-2xl border-2 border-dashed border-foreground/40 bg-background px-8 py-6 text-center">
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-background/60 backdrop-blur-sm">
+            <div className="rounded-2xl border-2 border-dashed border-accent/50 bg-raised px-8 py-6 text-center shadow-xl">
               <p className="text-lg font-medium">여기에 파일을 놓으세요</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              <p className="mt-1 text-sm text-muted">
                 이미지(PNG·JPG·WebP·GIF) 또는 PDF · 파일당 최대 32MB
               </p>
             </div>
@@ -1021,11 +1045,11 @@ export default function ChatClient() {
           }}
         >
           <div
-            className="w-full max-w-sm rounded-2xl border border-black/[.08] bg-background p-5 shadow-xl dark:border-white/[.12]"
+            className="w-full max-w-sm rounded-2xl border border-line bg-raised p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-base font-semibold">대화를 삭제할까요?</h2>
-            <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+            <p className="mt-2 text-sm text-muted">
               <b className="break-words text-foreground">{deleteTarget.title}</b>
               <br />이 대화의 모든 메시지가 영구 삭제되며 되돌릴 수 없습니다.
             </p>
@@ -1034,7 +1058,7 @@ export default function ChatClient() {
                 type="button"
                 onClick={() => setDeleteTarget(null)}
                 disabled={deleting}
-                className="rounded-lg border border-black/[.1] px-4 py-2 text-sm transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]"
+                className="rounded-lg border border-line px-4 py-2 text-sm transition-colors hover:bg-foreground/[.05] disabled:opacity-40"
               >
                 취소
               </button>
@@ -1042,7 +1066,7 @@ export default function ChatClient() {
                 type="button"
                 onClick={() => void confirmDelete()}
                 disabled={deleting}
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:opacity-40"
               >
                 {deleting ? "삭제 중…" : "삭제"}
               </button>
@@ -1079,16 +1103,17 @@ const MessageBubble = memo(function MessageBubble({
   const showCopy = message.content !== "" && !message.error;
 
   return (
-    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
+    <div
+      className={`group flex flex-col ${isUser ? "items-end" : "items-start"}`}
+    >
       <div
-        className={[
-          "max-w-[85%] rounded-2xl px-4 py-3 text-[15px] leading-7",
+        className={
           isUser
-            ? "bg-foreground text-background"
+            ? "max-w-[85%] rounded-3xl rounded-br-lg bg-bubble px-4 py-2.5 text-[15px] leading-7 text-bubble-fg shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
             : message.error
-              ? "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
-              : "bg-black/[.04] text-foreground dark:bg-white/[.06]",
-        ].join(" ")}
+              ? "max-w-[85%] rounded-2xl border border-red-500/25 bg-red-500/[.07] px-4 py-3 text-[15px] leading-7 text-red-600 dark:text-red-400"
+              : "w-full text-[15px] leading-7 text-foreground"
+        }
       >
         {message.attachments && message.attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
@@ -1099,21 +1124,29 @@ const MessageBubble = memo(function MessageBubble({
         )}
         {message.content &&
           (isUser || message.error || message.streaming ? (
-            <div className="whitespace-pre-wrap">{message.content}</div>
+            <div className="whitespace-pre-wrap">
+              {message.content}
+              {message.streaming && (
+                <span
+                  aria-hidden
+                  className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-full bg-accent align-[-2px]"
+                />
+              )}
+            </div>
           ) : (
             <Markdown content={message.content} />
           ))}
       </div>
       {(showCopy || onEdit || onRegenerate) && (
-        <div className="mt-1 flex gap-2">
+        <div className="mt-1.5 flex gap-1 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
           {showCopy && (
             <button
               type="button"
               onClick={copy}
               aria-label="메시지 복사"
-              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
             >
-              {copied ? "복사됨 ✓" : "📋 복사"}
+              {copied ? "복사됨 ✓" : "복사"}
             </button>
           )}
           {onEdit && (
@@ -1122,9 +1155,9 @@ const MessageBubble = memo(function MessageBubble({
               onClick={onEdit}
               aria-label="메시지 수정"
               title="이 메시지를 수정해 다시 보냅니다"
-              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
             >
-              ✏️ 수정
+              수정
             </button>
           )}
           {onRegenerate && (
@@ -1133,9 +1166,9 @@ const MessageBubble = memo(function MessageBubble({
               onClick={onRegenerate}
               aria-label="응답 재생성"
               title="이 응답을 버리고 다시 생성합니다"
-              className="px-1 text-xs text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-200"
+              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
             >
-              🔄 재생성
+              재생성
             </button>
           )}
         </div>
@@ -1159,7 +1192,7 @@ function AttachmentPreview({ att }: { att: UIAttachment }) {
         <img
           src={src}
           alt={att.name}
-          className="h-20 w-20 rounded-lg border border-black/[.06] object-cover dark:border-white/[.1]"
+          className="h-20 w-20 rounded-xl border border-line object-cover"
         />
         {att.uploading && <UploadingOverlay />}
       </div>
@@ -1168,11 +1201,9 @@ function AttachmentPreview({ att }: { att: UIAttachment }) {
 
   // 그 외(복원된 첨부 포함): 파일 칩
   return (
-    <div className="relative flex h-20 w-32 flex-col justify-center gap-1 rounded-lg border border-black/[.1] bg-background px-3 dark:border-white/[.15]">
+    <div className="relative flex h-20 w-32 flex-col justify-center gap-1 rounded-xl border border-line bg-raised px-3">
       <span className="text-xl">{isPdf ? "📄" : "📎"}</span>
-      <span className="truncate text-xs text-zinc-600 dark:text-zinc-300">
-        {att.name}
-      </span>
+      <span className="truncate text-xs text-muted">{att.name}</span>
       {att.uploading && <UploadingOverlay />}
     </div>
   );
@@ -1189,9 +1220,75 @@ function UploadingOverlay() {
 function TypingDots() {
   return (
     <span className="flex gap-1">
-      <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-muted/60 [animation-delay:-0.3s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-muted/60 [animation-delay:-0.15s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-muted/60" />
     </span>
+  );
+}
+
+// ── 아이콘 — 외부 라이브러리 없이 인라인 SVG ──────────
+function IconPlus() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function IconMenu() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  );
+}
+
+function IconTrash() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    </svg>
+  );
+}
+
+function IconPaperclip() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
+function IconGlobe() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18" />
+    </svg>
+  );
+}
+
+function IconArrowUp() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 19V5m-7 7 7-7 7 7" />
+    </svg>
+  );
+}
+
+function IconStop() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <rect x="5" y="5" width="14" height="14" rx="2.5" />
+    </svg>
+  );
+}
+
+function IconSpinner() {
+  return (
+    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden>
+      <path d="M12 3a9 9 0 1 0 9 9" />
+    </svg>
   );
 }

@@ -339,7 +339,9 @@ export async function POST(req: Request): Promise<Response> {
 
   // 7) provider 선택 후 스트림. 동시에 전체 텍스트를 누적해 종료 시 assistant 저장.
   const streamFn = modelDef.provider === "openai" ? streamOpenAI : streamClaude;
-  const webSearch = webSearchRequested && modelDef.provider === "anthropic";
+  // 웹 검색은 양쪽 다 지원 — Claude는 web_search 서버 도구,
+  // GPT는 Responses API의 web_search 도구를 쓴다.
+  const webSearch = webSearchRequested;
   // 사고 깊이: adaptive thinking 지원 모델(Sonnet 5·Opus 4.8 등)에서만
   // thinking/effort를 보낸다. Haiku·GPT는 미지원이라 undefined로 두어
   // 파라미터 자체를 생략한다(보내면 400).

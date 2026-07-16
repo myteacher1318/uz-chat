@@ -35,7 +35,7 @@ function Pre({ children }: React.HTMLAttributes<HTMLPreElement>) {
       </button>
       <pre
         ref={preRef}
-        className="overflow-x-auto rounded-lg bg-[#0d1117] p-3 text-[13px] leading-6"
+        className="overflow-x-auto rounded-xl bg-[#0d1117] p-3.5 text-[13px] leading-6"
       >
         {children}
       </pre>
@@ -47,7 +47,7 @@ function Pre({ children }: React.HTMLAttributes<HTMLPreElement>) {
 // 스트리밍 중 매 청크마다 다시 렌더링되므로 content가 같으면 건너뛴다(memo).
 function MarkdownImpl({ content }: { content: string }) {
   return (
-    <div className="prose prose-zinc max-w-none break-words dark:prose-invert prose-p:my-2 prose-headings:mb-2 prose-headings:mt-4 prose-pre:my-2 prose-pre:bg-transparent prose-pre:p-0 prose-ol:my-2 prose-ul:my-2 prose-li:my-0.5 prose-table:my-2 prose-code:before:content-none prose-code:after:content-none">
+    <div className="prose prose-stone max-w-none break-words dark:prose-invert prose-p:my-2 prose-headings:mb-2 prose-headings:mt-4 prose-pre:my-2 prose-pre:bg-transparent prose-pre:p-0 prose-ol:my-2 prose-ul:my-2 prose-li:my-0.5 prose-table:my-2 prose-code:before:content-none prose-code:after:content-none">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

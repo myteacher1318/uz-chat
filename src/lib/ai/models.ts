@@ -14,15 +14,14 @@ export type ModelDef = {
 };
 
 // maxTokens는 채팅에선 사실상 넉넉한 값(32K ≈ 한글 2만자 이상).
-// 모델별 상한 주의: GPT-4o는 16,384가 하드 상한이라 그 이상 불가.
+// GPT-5.6 패밀리(2026-07-09 출시, Sol/Terra/Luna)는 최대 출력 128K라 여유 있음.
 // 비용/사용량은 추후 /admin에서 모니터링해 조정.
 export const MODELS: ModelDef[] = [
   { id: "claude-sonnet-5", label: "Claude Sonnet 5 (균형)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic", maxTokens: 32000 },
-  { id: "gpt-5.5", label: "GPT-5.5 (최신)", provider: "openai", maxTokens: 32000 },
-  { id: "gpt-5.4-mini", label: "GPT-5.4 mini (빠름/저렴)", provider: "openai", maxTokens: 32000 },
-  { id: "gpt-4o", label: "GPT-4o (범용)", provider: "openai", maxTokens: 16384 },
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (최신 고성능)", provider: "openai", maxTokens: 32000 },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (빠름/저렴)", provider: "openai", maxTokens: 32000 },
 ];
 
 export const DEFAULT_MODEL = "claude-sonnet-5";

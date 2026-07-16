@@ -62,7 +62,8 @@ export async function GET(req: Request): Promise<Response> {
     const { data, error } = await supabase
       .from("conversations")
       .select("id, title, updated_at")
-      .order("updated_at", { ascending: false });
+      .order("updated_at", { ascending: false })
+      .limit(100); // 사이드바 표시용 — 무한정 커지지 않게 최근 100개만
     if (error) throw error;
     return Response.json(data ?? []);
   } catch (err) {

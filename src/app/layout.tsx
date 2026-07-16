@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -15,6 +15,14 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "UZ Chat",
   description: "Claude 기반 한국어 AI 채팅",
+};
+
+// 모바일 브라우저 상단 UI 색을 배경과 맞춘다 (globals.css 토큰과 동일 값)
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#faf9f7" },
+    { media: "(prefers-color-scheme: dark)", color: "#1c1b18" },
+  ],
 };
 
 export default function RootLayout({
