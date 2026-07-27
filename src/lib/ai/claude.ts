@@ -4,6 +4,12 @@ import type { NeutralMessage } from "./types";
 
 // Files API는 베타라 messages 호출에도 동일 베타 헤더가 필요하다.
 const FILES_BETA = "files-api-2025-04-14";
+// 안전 분류기 거절 시 서버가 다른 모델로 이어 실행하게 하는 베타.
+// (배열 형식 fallbacks 와 짝을 이루는 헤더 — 설치된 SDK 0.107 이 지원하는 형식)
+const FALLBACK_BETA = "server-side-fallback-2026-06-01";
+// 서버 도구(web_search) 루프가 한도에 걸려 pause_turn 으로 멈췄을 때 이어받는 최대 횟수.
+// 총 요청 수는 최대 MAX_CONTINUATIONS + 1 회.
+const MAX_CONTINUATIONS = 3;
 
 export interface StreamOptions {
   model: string;
@@ -19,6 +25,9 @@ export interface StreamOptions {
   effort?: "low" | "medium" | "high";
   // 웹 검색 서버 도구 사용 여부 (Anthropic 전용)
   webSearch?: boolean;
+  // 안전 분류기가 요청을 거절했을 때 서버가 대신 실행할 모델 (Opus 5 등).
+  // 미지정이면 폴백 없이 거절이 그대로 반환된다.
+  fallbackModel?: string;
   // 프롬프트 캐싱 사용 여부 (Anthropic 전용). 히스토리가 append-only 인
   // 동안만 켤 것 — 슬라이딩 윈도우가 시작되면 프리픽스가 바뀌어 캐시가
   // 매번 빗나가면서 쓰기 비용(1.25x)만 든다.
@@ -71,6 +80,17 @@ function toAnthropicMessage(m: NeutralMessage): Anthropic.Beta.BetaMessageParam 
   return { role: "user", content: blocks.length ? blocks : m.text };
 }
 
+/** 수집한 인용 출처를 응답 끝에 붙일 마크다운으로. 출처가 없으면 빈 문자열. */
+function formatSources(sources: Map<string, string>): string {
+  if (sources.size === 0) return "";
+  let out = "\n\n---\n\n**출처**\n\n";
+  let i = 1;
+  for (const [url, title] of sources) {
+    out += `${i++}. [${title}](${url})\n`;
+  }
+  return out;
+}
+
 /** Claude를 호출해 응답 텍스트를 델타 단위로 흘려보낸다. */
 export async function* streamClaude({
   model,
@@ -80,6 +100,7 @@ export async function* streamClaude({
   thinking,
   effort,
   webSearch,
+  fallbackModel,
   cache,
   onUsage,
 }: StreamOptions): AsyncGenerator<string> {
@@ -108,16 +129,15 @@ export async function* streamClaude({
     }
   }
 
-  const stream = anthropic.beta.messages.stream({
+  const params = {
     model,
     max_tokens: maxTokens,
     system,
-    messages: anthropicMessages,
-    betas: [FILES_BETA],
+    betas: fallbackModel ? [FILES_BETA, FALLBACK_BETA] : [FILES_BETA],
     // 사고(thinking): 지원 모델에서만 지정(true/false). display 기본값(omitted)
     // 이라 사고 내용은 스트림에 노출되지 않고 답변 품질만 올라간다.
-    //   adaptive  → 필요할 때만 스스로 사고 (표준/깊게)
-    //   disabled  → 사고 끔, 최소 지연 (빠르게)
+    //   adaptive  → 필요할 때만 스스로 사고
+    //   disabled  → 사고 끔 (models.ts 의 경고 참고 — 현재는 쓰지 않는다)
     ...(thinking !== undefined
       ? {
           thinking: thinking
@@ -140,29 +160,78 @@ export async function* streamClaude({
           ],
         }
       : {}),
-  });
+    // 거절 폴백: 안전 분류기가 막으면 서버가 이 모델로 같은 요청을 이어 실행한다.
+    // 거절 자체는 오류가 아니라 정상 200 응답이라, 이게 없으면 빈 답변으로 끝난다.
+    ...(fallbackModel ? { fallbacks: [{ model: fallbackModel }] } : {}),
+  };
 
   let inputTokens = 0;
   let outputTokens = 0;
+  // 인용 출처 — 같은 URL이 여러 번 인용되므로 URL을 키로 중복을 제거한다.
+  const sources = new Map<string, string>();
+  let sawText = false;
+  let refused = false;
+  let stillPaused = false;
 
-  for await (const event of stream) {
-    if (event.type === "message_start") {
-      // message_start.message.usage 에 입력 토큰이 들어온다.
-      // 캐시 사용 시 input_tokens 는 비캐시 분량만이라 캐시 읽기/쓰기도 합산.
-      const u = event.message.usage;
-      inputTokens =
-        (u.input_tokens ?? 0) +
-        (u.cache_creation_input_tokens ?? 0) +
-        (u.cache_read_input_tokens ?? 0);
-    } else if (
-      event.type === "content_block_delta" &&
-      event.delta.type === "text_delta"
-    ) {
-      yield event.delta.text;
-    } else if (event.type === "message_delta") {
-      // message_delta.usage.output_tokens 는 누적 출력 토큰(최종값).
-      outputTokens = event.usage.output_tokens ?? outputTokens;
+  // 서버 도구 루프가 한도에 걸리면 stop_reason: "pause_turn" 으로 멈춘다.
+  // 이때는 지금까지의 assistant 응답을 붙여 다시 요청하면 서버가 이어서 진행한다.
+  // ("계속" 같은 user 메시지를 덧붙이면 안 된다 — API가 알아서 재개한다)
+  for (let round = 0; ; round++) {
+    const stream = anthropic.beta.messages.stream({
+      ...params,
+      messages: anthropicMessages,
+    });
+    let roundOutput = 0;
+
+    for await (const event of stream) {
+      if (event.type === "message_start") {
+        // message_start.message.usage 에 입력 토큰이 들어온다.
+        // 캐시 사용 시 input_tokens 는 비캐시 분량만이라 캐시 읽기/쓰기도 합산.
+        const u = event.message.usage;
+        inputTokens +=
+          (u.input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0);
+      } else if (event.type === "content_block_delta") {
+        if (event.delta.type === "text_delta") {
+          if (event.delta.text) sawText = true;
+          yield event.delta.text;
+        } else if (event.delta.type === "citations_delta") {
+          // 웹 검색으로 인용된 출처. 모델이 실제로 근거로 쓴 것만 들어온다
+          // (검색 결과 전체가 아니라서 노이즈가 적다).
+          const c = event.delta.citation;
+          if (c.type === "web_search_result_location" && c.url && !sources.has(c.url)) {
+            sources.set(c.url, c.title?.trim() || c.url);
+          }
+        }
+      } else if (event.type === "message_delta") {
+        // message_delta.usage.output_tokens 는 이 메시지의 누적 출력 토큰(최종값).
+        roundOutput = event.usage.output_tokens ?? roundOutput;
+      }
     }
+    outputTokens += roundOutput;
+
+    const final = await stream.finalMessage();
+    if (final.stop_reason === "refusal") {
+      refused = true;
+      break;
+    }
+    if (final.stop_reason !== "pause_turn") break;
+    if (round >= MAX_CONTINUATIONS) {
+      stillPaused = true;
+      break;
+    }
+    anthropicMessages.push({ role: "assistant", content: final.content });
+  }
+
+  const sourceBlock = formatSources(sources);
+  if (sourceBlock) yield sourceBlock;
+
+  if (refused && !sawText) {
+    // 폴백까지 모두 거절된 경우. 빈 화면 대신 이유를 알려준다.
+    yield "⚠️ 이 요청은 안전 정책에 따라 처리되지 않았습니다. 질문을 다르게 표현해 보세요.";
+  } else if (stillPaused) {
+    yield "\n\n⚠️ 검색이 길어져 여기서 중단했습니다. 질문을 좁혀서 다시 물어보세요.";
   }
 
   onUsage?.({ input: inputTokens, output: outputTokens });

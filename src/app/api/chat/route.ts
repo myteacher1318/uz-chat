@@ -368,6 +368,8 @@ export async function POST(req: Request): Promise<Response> {
           thinking: depthCfg?.thinking,
           effort: depthCfg?.effort,
           webSearch,
+          // Opus 5 등 안전장치가 강한 모델의 거절을 서버가 다른 모델로 이어받게 한다.
+          fallbackModel: modelDef.fallbackModel,
           // 히스토리가 잘리기 전(append-only)에만 캐싱 — 윈도우가 밀리기
           // 시작하면 프리픽스가 매번 달라져 캐시 이득이 없다.
           cache: built.length < historyLimit,

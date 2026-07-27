@@ -11,6 +11,10 @@ export type ModelDef = {
   // adaptive thinking 지원 모델(Sonnet 4.6+/Opus 4.6+)에서만 true.
   // Haiku 4.5는 adaptive 미지원이라 켜면 400 오류.
   adaptiveThinking?: boolean;
+  // 안전 분류기가 요청을 거절(stop_reason: "refusal")했을 때 서버가 대신 실행할 모델.
+  // Opus 5처럼 보안 안전장치가 강화된 모델에만 지정한다. 지정하면 거절된 요청이
+  // 빈 응답으로 끝나지 않고 이 모델이 이어서 답한다.
+  fallbackModel?: string;
 };
 
 // maxTokens는 채팅에선 사실상 넉넉한 값(32K ≈ 한글 2만자 이상).
@@ -18,7 +22,7 @@ export type ModelDef = {
 // 비용/사용량은 추후 /admin에서 모니터링해 조정.
 export const MODELS: ModelDef[] = [
   { id: "claude-sonnet-5", label: "Claude Sonnet 5 (균형)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true },
+  { id: "claude-opus-5", label: "Claude Opus 5 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic", maxTokens: 32000 },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (최신 고성능)", provider: "openai", maxTokens: 32000 },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (빠름/저렴)", provider: "openai", maxTokens: 32000 },
@@ -47,13 +51,22 @@ export const THINKING_DEPTHS: { id: ThinkingDepth; label: string }[] = [
   { id: "deep", label: "깊게" },
 ];
 
-// 기본값: 빠르게 — 사고를 끄고 낮은 effort로 최소 지연 응답.
+// 기본값: 빠르게 — 낮은 effort로 최소 지연 응답.
 export const DEFAULT_THINKING_DEPTH: ThinkingDepth = "fast";
 
 export type DepthParams = { thinking: boolean; effort: Effort };
 
+// ⚠️ "빠르게"도 사고를 끄지 않고 effort만 낮춘다.
+// Opus 5/Sonnet 5에서 thinking: disabled 로 두면 두 가지 오작동이 보고돼 있다:
+//   1) 도구 호출을 tool_use 블록이 아니라 "본문 텍스트"로 써버린다. 턴은 정상 종료되고
+//      오류도 없지만 검색이 실제로 실행되지 않는다 — 웹 검색이 기본 켜져 있는 이 앱에
+//      정확히 해당하는 조합이라 조용한 오작동이 된다.
+//   2) <thinking> 같은 내부 태그가 응답에 새어나올 수 있다.
+// 두 모델 모두 "사고를 끄기보다 effort를 낮추라"가 권장 대응이고, low effort만으로도
+// 지연·토큰 절감 효과는 대부분 얻는다. 사고 끄기가 꼭 필요하면 thinking: false 로 되돌리되
+// 위 위험을 감수해야 한다.
 const DEPTH_PARAMS: Record<ThinkingDepth, DepthParams> = {
-  fast: { thinking: false, effort: "low" }, // 사고 끔 — 가장 빠름
+  fast: { thinking: true, effort: "low" }, // 적응형 사고 + 낮음 — 가장 빠름
   standard: { thinking: true, effort: "medium" }, // 적응형 사고 + 중간
   deep: { thinking: true, effort: "high" }, // 적응형 사고 + 높음(더 신중)
 };
