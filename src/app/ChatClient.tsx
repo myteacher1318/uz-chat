@@ -960,7 +960,7 @@ export default function ChatClient() {
                     value={depth}
                     onChange={(e) => setDepth(e.target.value as ThinkingDepth)}
                     aria-label="사고 깊이"
-                    title="빠르게: 사고 없이 최소 지연 · 표준·깊게: 필요할 때 더 신중히 사고합니다"
+                    title="빠르게: 최소 지연 · 표준·깊게: 뒤로 갈수록 더 신중히 사고하고 답이 느려집니다"
                     className="h-8 rounded-lg bg-transparent px-1.5 text-xs text-muted outline-none transition-colors hover:bg-foreground/[.05] hover:text-foreground"
                   >
                     {THINKING_DEPTHS.map((d) => (
