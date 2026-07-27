@@ -12,6 +12,7 @@ export interface StreamOptions {
   effort?: "low" | "medium" | "high";
   cache?: boolean;
   fallbackModel?: string;
+  webTools?: "latest" | "basic";
   // 웹 검색 도구 사용 여부 — Responses API의 web_search 서버 도구.
   webSearch?: boolean;
   // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.

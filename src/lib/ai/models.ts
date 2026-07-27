@@ -15,15 +15,21 @@ export type ModelDef = {
   // Opus 5처럼 보안 안전장치가 강화된 모델에만 지정한다. 지정하면 거절된 요청이
   // 빈 응답으로 끝나지 않고 이 모델이 이어서 답한다.
   fallbackModel?: string;
+  // 웹 서버 도구(web_search/web_fetch) 세대 — Anthropic 모델 전용.
+  //   "latest" → _20260209 계열(동적 필터링 포함). Opus 4.6+/Sonnet 4.6+ 에서만 동작한다.
+  //   "basic"  → web_search_20250305 만. Haiku 4.5 처럼 이전 세대 모델용
+  //              (이 세대에 _20260209 를 보내면 400).
+  // 미지정이면 웹 도구를 붙이지 않는다. GPT 계열은 openai.ts 가 따로 처리한다.
+  webTools?: "latest" | "basic";
 };
 
 // maxTokens는 채팅에선 사실상 넉넉한 값(32K ≈ 한글 2만자 이상).
 // GPT-5.6 패밀리(2026-07-09 출시, Sol/Terra/Luna)는 최대 출력 128K라 여유 있음.
 // 비용/사용량은 추후 /admin에서 모니터링해 조정.
 export const MODELS: ModelDef[] = [
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5 (균형)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true },
-  { id: "claude-opus-5", label: "Claude Opus 5 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8" },
-  { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic", maxTokens: 32000 },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5 (균형)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, webTools: "latest" },
+  { id: "claude-opus-5", label: "Claude Opus 5 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8", webTools: "latest" },
+  { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic", maxTokens: 32000, webTools: "basic" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (최신 고성능)", provider: "openai", maxTokens: 32000 },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (빠름/저렴)", provider: "openai", maxTokens: 32000 },
 ];

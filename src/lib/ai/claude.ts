@@ -23,8 +23,11 @@ export interface StreamOptions {
   thinking?: boolean;
   // 사고 깊이 → output_config.effort. thinking과 마찬가지로 지원 모델에서만.
   effort?: "low" | "medium" | "high";
-  // 웹 검색 서버 도구 사용 여부 (Anthropic 전용)
+  // 웹 서버 도구(검색·페이지 읽기) 사용 여부 (Anthropic 전용)
   webSearch?: boolean;
+  // 웹 서버 도구 세대 — models.ts 의 ModelDef.webTools 를 그대로 넘긴다.
+  // 미지정이면 webSearch 가 true 여도 도구를 붙이지 않는다(해당 모델이 미지원).
+  webTools?: "latest" | "basic";
   // 안전 분류기가 요청을 거절했을 때 서버가 대신 실행할 모델 (Opus 5 등).
   // 미지정이면 폴백 없이 거절이 그대로 반환된다.
   fallbackModel?: string;
@@ -80,6 +83,46 @@ function toAnthropicMessage(m: NeutralMessage): Anthropic.Beta.BetaMessageParam 
   return { role: "user", content: blocks.length ? blocks : m.text };
 }
 
+// 한 응답에서 서버 도구를 쓸 수 있는 최대 횟수 — 비용 방어.
+const WEB_MAX_USES = 3;
+// web_fetch 가 한 페이지에서 읽어올 최대 토큰. 긴 문서가 통째로 들어와
+// 입력 비용이 튀는 것을 막는다 (일반 기사 한 편은 보통 5~15k 수준).
+const WEB_FETCH_MAX_TOKENS = 30000;
+
+/**
+ * 모델 세대에 맞는 웹 서버 도구 목록.
+ * _20260209 계열은 Opus 4.6+/Sonnet 4.6+ 에서만 동작하므로, 이전 세대 모델에는
+ * 기본 변형(web_search_20250305)만 준다. web_fetch 는 최신 세대에만 붙인다.
+ */
+function webToolsFor(tier: "latest" | "basic" | undefined) {
+  if (tier === "latest") {
+    return [
+      {
+        type: "web_search_20260209" as const,
+        name: "web_search" as const,
+        max_uses: WEB_MAX_USES,
+      },
+      {
+        // 대화에 이미 등장한 URL만 가져온다 — 모델이 임의의 주소를 부를 수 없다.
+        type: "web_fetch_20260209" as const,
+        name: "web_fetch" as const,
+        max_uses: WEB_MAX_USES,
+        max_content_tokens: WEB_FETCH_MAX_TOKENS,
+      },
+    ];
+  }
+  if (tier === "basic") {
+    return [
+      {
+        type: "web_search_20250305" as const,
+        name: "web_search" as const,
+        max_uses: WEB_MAX_USES,
+      },
+    ];
+  }
+  return [];
+}
+
 /** 수집한 인용 출처를 응답 끝에 붙일 마크다운으로. 출처가 없으면 빈 문자열. */
 function formatSources(sources: Map<string, string>): string {
   if (sources.size === 0) return "";
@@ -100,6 +143,7 @@ export async function* streamClaude({
   thinking,
   effort,
   webSearch,
+  webTools,
   fallbackModel,
   cache,
   onUsage,
@@ -147,18 +191,10 @@ export async function* streamClaude({
       : {}),
     // 사고 깊이 → effort. 사고·응답 토큰 예산을 조절한다 (지원 모델 전용).
     ...(effort ? { output_config: { effort } } : {}),
-    // 웹 검색은 서버 도구라 선언만 하면 API가 알아서 실행한다.
-    // max_uses로 요청당 검색 횟수를 제한해 비용을 방어.
-    ...(webSearch
-      ? {
-          tools: [
-            {
-              type: "web_search_20260209" as const,
-              name: "web_search" as const,
-              max_uses: 3,
-            },
-          ],
-        }
+    // 웹 검색·페이지 읽기는 서버 도구라 선언만 하면 API가 알아서 실행한다.
+    // 도구 세대는 모델마다 다르므로 webToolsFor 가 골라준다 (미지원 모델은 빈 배열).
+    ...(webSearch && webToolsFor(webTools).length > 0
+      ? { tools: webToolsFor(webTools) }
       : {}),
     // 거절 폴백: 안전 분류기가 막으면 서버가 이 모델로 같은 요청을 이어 실행한다.
     // 거절 자체는 오류가 아니라 정상 200 응답이라, 이게 없으면 빈 답변으로 끝난다.
@@ -192,6 +228,21 @@ export async function* streamClaude({
           (u.input_tokens ?? 0) +
           (u.cache_creation_input_tokens ?? 0) +
           (u.cache_read_input_tokens ?? 0);
+      } else if (event.type === "content_block_start") {
+        // web_fetch 로 읽은 페이지. 검색과 달리 인용에 URL이 실려오지 않으므로
+        // 결과 블록에서 직접 꺼내 같은 출처 목록에 합친다.
+        const block = event.content_block;
+        if (
+          block.type === "web_fetch_tool_result" &&
+          block.content.type === "web_fetch_result" &&
+          block.content.url &&
+          !sources.has(block.content.url)
+        ) {
+          sources.set(
+            block.content.url,
+            block.content.content.title?.trim() || block.content.url,
+          );
+        }
       } else if (event.type === "content_block_delta") {
         if (event.delta.type === "text_delta") {
           if (event.delta.text) sawText = true;

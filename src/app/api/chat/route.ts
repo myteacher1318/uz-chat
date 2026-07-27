@@ -346,9 +346,22 @@ export async function POST(req: Request): Promise<Response> {
   // thinking/effort를 보낸다. Haiku·GPT는 미지원이라 undefined로 두어
   // 파라미터 자체를 생략한다(보내면 400).
   const depthCfg = modelDef.adaptiveThinking === true ? depthParams(depth) : null;
-  // 도구가 실제로 있을 때만 검색 지침을 추가 (없는 도구를 언급하면 환각 유발)
-  const system = webSearch
-    ? `${SYSTEM_PROMPT}\n- 최신 정보가 필요하거나 사실 확인이 필요하면 web_search 도구로 검색한 뒤 답합니다.`
+  // 도구가 실제로 있을 때만 지침을 추가 (없는 도구를 언급하면 환각 유발).
+  // GPT는 openai.ts가 자체 web_search를 붙이고, Claude는 모델 세대별로 갈린다
+  // (구세대는 검색만, 최신 세대는 web_fetch까지).
+  const hasSearch =
+    webSearch && (modelDef.provider === "openai" || !!modelDef.webTools);
+  const hasFetch = webSearch && modelDef.webTools === "latest";
+  const system = hasSearch
+    ? [
+        SYSTEM_PROMPT,
+        "- 최신 정보가 필요하거나 사실 확인이 필요하면 web_search 도구로 검색한 뒤 답합니다.",
+        ...(hasFetch
+          ? [
+              "- 대화에 URL이 있고 그 내용이 필요하면 web_fetch 도구로 해당 페이지를 직접 읽고 답합니다.",
+            ]
+          : []),
+      ].join("\n")
     : SYSTEM_PROMPT;
 
   const encoder = new TextEncoder();
@@ -368,6 +381,8 @@ export async function POST(req: Request): Promise<Response> {
           thinking: depthCfg?.thinking,
           effort: depthCfg?.effort,
           webSearch,
+          // 웹 도구 세대 — 모델이 지원하는 변형만 보낸다 (구세대에 최신 변형은 400).
+          webTools: modelDef.webTools,
           // Opus 5 등 안전장치가 강한 모델의 거절을 서버가 다른 모델로 이어받게 한다.
           fallbackModel: modelDef.fallbackModel,
           // 히스토리가 잘리기 전(append-only)에만 캐싱 — 윈도우가 밀리기
