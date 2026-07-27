@@ -15,6 +15,7 @@ import {
   type ThinkingDepth,
 } from "@/lib/ai/models";
 import Markdown from "./Markdown";
+import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
 
 type Conversation = { id: string; title: string; updated_at: string };
 
@@ -36,6 +37,8 @@ type Message = {
   attachments?: UIAttachment[];
   error?: boolean;
   streaming?: boolean;
+  // 사고 요약 — 화면 표시 전용이라 DB에 저장하지 않고 새로고침하면 사라진다.
+  thinking?: string;
 };
 
 function fileToBase64(file: File): Promise<string> {
@@ -89,6 +92,10 @@ export default function ChatClient() {
   const [model, setModel] = useState<string>(MODELS[0].id);
   // 웹 검색은 기본 켬 — 아래 토글 버튼으로 끌 수 있다 (Claude·GPT 모두 지원)
   const [webSearch, setWebSearch] = useState(true);
+  // 대화 목록 검색어 (제목 + 메시지 본문을 서버에서 함께 찾는다)
+  const [convSearch, setConvSearch] = useState("");
+  const convSearchRef = useRef("");
+  const convSearchFirstRun = useRef(true);
   const [depth, setDepth] = useState<ThinkingDepth>(DEFAULT_THINKING_DEPTH);
   const [editPending, setEditPending] = useState(false); // 다음 전송이 '마지막 턴 수정'인지
   const [pending, setPending] = useState<UIAttachment[]>([]);
@@ -152,9 +159,14 @@ export default function ChatClient() {
   }, [input]);
 
   // ── 대화 목록/메시지 ──────────────────────────
+  // 검색어는 ref로도 들고 있는다 — refreshConversations 는 목록 갱신이 필요한
+  // 여러 곳(새 대화·삭제·전송 후)에서 불리는데, 그때마다 최신 검색어를 봐야 한다.
   async function refreshConversations(): Promise<Conversation[]> {
     try {
-      const res = await fetch("/api/conversations");
+      const q = convSearchRef.current.trim();
+      const res = await fetch(
+        q ? `/api/conversations?q=${encodeURIComponent(q)}` : "/api/conversations",
+      );
       if (!res.ok) return [];
       const list = (await res.json()) as Conversation[];
       setConversations(list);
@@ -163,6 +175,21 @@ export default function ChatClient() {
       return [];
     }
   }
+
+  // 검색어 변경 시 목록 재조회 — 입력 중 매 글자마다 조회하지 않도록 디바운스.
+  // 최초 마운트에서는 별도의 초기 로드가 이미 돌므로 건너뛴다.
+  useEffect(() => {
+    convSearchRef.current = convSearch;
+    if (convSearchFirstRun.current) {
+      convSearchFirstRun.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      void refreshConversations();
+    }, 250);
+    return () => clearTimeout(timer);
+    // refreshConversations 는 ref로 최신 검색어를 읽으므로 의존성이 필요 없다.
+  }, [convSearch]);
 
   async function loadMessages(conversationId: string) {
     const seq = ++loadSeq.current;
@@ -395,6 +422,10 @@ export default function ChatClient() {
     let flushTimer: number | null = null;
     let lastFlushAt = 0;
     let buffered = "";
+    // 사고 요약은 본문과 다른 영역에 쌓는다. 서버가 THINK_OPEN/CLOSE 마커로
+    // 구간을 표시해 보내므로, 아래 읽기 루프에서 상태를 보며 갈라 담는다.
+    let bufferedThink = "";
+    let inThinking = false;
     // 토큰 반영 주기 — 매 프레임(초당 60회) 대신 이 간격으로 묶어 반영한다.
     // 답변이 길어질수록 말풍선 레이아웃 비용이 커지는데, 반영 횟수를 줄이면
     // 그 비용이 1/6로 떨어져 스트리밍 중에도 화면이 매끄럽게 유지된다.
@@ -402,7 +433,9 @@ export default function ChatClient() {
 
     const applyBuffered = (finalize: boolean) => {
       const delta = buffered;
+      const deltaThink = bufferedThink;
       buffered = "";
+      bufferedThink = "";
       setMessages((prev) => {
         const copy = [...prev];
         let idx = -1;
@@ -417,6 +450,7 @@ export default function ChatClient() {
         copy[idx] = {
           ...cur,
           content: cur.content + delta,
+          thinking: deltaThink ? (cur.thinking ?? "") + deltaThink : cur.thinking,
           streaming: finalize ? false : cur.streaming,
         };
         return copy;
@@ -492,7 +526,23 @@ export default function ChatClient() {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        buffered += chunk;
+        // 마커를 기준으로 본문/사고로 갈라 담는다. 마커는 1글자라 청크 경계에서
+        // 쪼개질 수 없고, 상태(inThinking)는 청크를 넘어 유지된다.
+        let rest = chunk;
+        while (rest) {
+          const marker = inThinking ? THINK_CLOSE : THINK_OPEN;
+          const at = rest.indexOf(marker);
+          if (at === -1) {
+            if (inThinking) bufferedThink += rest;
+            else buffered += rest;
+            break;
+          }
+          const head = rest.slice(0, at);
+          if (inThinking) bufferedThink += head;
+          else buffered += head;
+          rest = rest.slice(at + marker.length);
+          inThinking = !inThinking;
+        }
         scheduleFlush();
       }
 
@@ -516,12 +566,21 @@ export default function ChatClient() {
           if (idx < 0) return prev;
           const cur = copy[idx];
           const nextContent = cur.content + buffered;
+          const nextThinking = (cur.thinking ?? "") + bufferedThink;
           buffered = "";
+          bufferedThink = "";
+          // 사고만 오고 본문이 없는 채로 중지된 경우도 '아무것도 못 받음'으로 본다
+          // (사고 요약만 남은 말풍선은 사용자에게 의미가 없다).
           if (cur.role === "assistant" && nextContent === "") {
             copy.splice(idx, 1);
             return copy;
           }
-          copy[idx] = { ...cur, content: nextContent, streaming: false };
+          copy[idx] = {
+            ...cur,
+            content: nextContent,
+            thinking: nextThinking || undefined,
+            streaming: false,
+          };
           return copy;
         });
       } else {
@@ -731,13 +790,23 @@ export default function ChatClient() {
             <IconPlus />새 대화
           </button>
         </div>
+        <div className="px-4 pb-2.5">
+          <input
+            type="search"
+            value={convSearch}
+            onChange={(e) => setConvSearch(e.target.value)}
+            placeholder="대화 검색"
+            aria-label="대화 검색"
+            className="w-full rounded-lg border border-line bg-raised px-3 py-1.5 text-sm outline-none transition-colors placeholder:text-muted/70 focus:border-accent/40"
+          />
+        </div>
         <p className="px-5 pb-1.5 text-[11px] font-medium tracking-wider text-muted/80">
-          대화 목록
+          {convSearch.trim() ? "검색 결과" : "대화 목록"}
         </p>
         <nav className="nice-scroll flex-1 overflow-y-auto px-2 pb-3">
           {conversations.length === 0 ? (
             <p className="px-2 py-4 text-center text-xs text-muted/70">
-              대화가 없습니다
+              {convSearch.trim() ? "검색 결과가 없습니다" : "대화가 없습니다"}
             </p>
           ) : (
             <ul className="flex flex-col gap-0.5">
@@ -1121,6 +1190,21 @@ const MessageBubble = memo(function MessageBubble({
               <AttachmentPreview key={a.id} att={a} />
             ))}
           </div>
+        )}
+        {!isUser && message.thinking && (
+          <details
+            // 사고 중에는 펼쳐 둬 긴 침묵 대신 진행 상황이 보이게 하고,
+            // 본문이 시작되면 접어 답변을 가리지 않게 한다.
+            open={!!message.streaming && !message.content}
+            className="mb-2 rounded-xl border border-foreground/10 bg-foreground/[.03] px-3 py-2"
+          >
+            <summary className="cursor-pointer select-none text-xs font-medium text-muted">
+              {message.streaming && !message.content ? "사고 중…" : "사고 과정"}
+            </summary>
+            <div className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-muted">
+              {message.thinking}
+            </div>
+          </details>
         )}
         {message.content &&
           (isUser || message.error || message.streaming ? (

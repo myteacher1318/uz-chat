@@ -53,19 +53,78 @@ export async function POST(req: Request): Promise<Response> {
   }
 }
 
-// GET /api/conversations  : 전체 목록을 updated_at 내림차순으로.
+const LIST_LIMIT = 100; // 사이드바 표시용 — 무한정 커지지 않게 최근 N개만
+const SEARCH_MSG_SCAN = 300; // 본문 검색 시 훑어볼 메시지 행 수 상한
+
+// ilike 패턴에서 와일드카드(%, _)와 이스케이프 문자를 문자 그대로 취급하게 한다.
+// (이게 없으면 "100%" 같은 입력이 전체 매칭으로 번진다)
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+// GET /api/conversations[?q=검색어]  : 목록을 updated_at 내림차순으로.
+// q가 있으면 제목과 메시지 본문을 함께 찾아 합친다.
 // 페이지 최초 로드 시 호출되므로 여기서 접속 IP도 누적 기록한다.
 export async function GET(req: Request): Promise<Response> {
+  const raw = new URL(req.url).searchParams.get("q")?.trim() ?? "";
+  const q = raw.slice(0, 100); // 과도하게 긴 검색어 차단
+
   try {
     const supabase = getSupabase();
     void recordAccess(supabase, clientIp(req), req.headers.get("user-agent"));
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, title, updated_at")
-      .order("updated_at", { ascending: false })
-      .limit(100); // 사이드바 표시용 — 무한정 커지지 않게 최근 100개만
-    if (error) throw error;
-    return Response.json(data ?? []);
+
+    if (!q) {
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("id, title, updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(LIST_LIMIT);
+      if (error) throw error;
+      return Response.json(data ?? []);
+    }
+
+    const pattern = `%${escapeLike(q)}%`;
+
+    // 제목 매칭과 본문 매칭을 동시에 조회한다. 본문 매칭은 대화 id만 모은 뒤
+    // 2차 조회로 제목·시각을 채운다 (messages 에는 title/updated_at 이 없다).
+    const [titleHits, msgHits] = await Promise.all([
+      supabase
+        .from("conversations")
+        .select("id, title, updated_at")
+        .ilike("title", pattern)
+        .order("updated_at", { ascending: false })
+        .limit(LIST_LIMIT),
+      supabase
+        .from("messages")
+        .select("conversation_id")
+        .ilike("content", pattern)
+        .order("created_at", { ascending: false })
+        .limit(SEARCH_MSG_SCAN),
+    ]);
+    if (titleHits.error) throw titleHits.error;
+
+    const byId = new Map<string, { id: string; title: string; updated_at: string }>();
+    for (const c of titleHits.data ?? []) byId.set(c.id, c);
+
+    const extraIds = [
+      ...new Set(
+        (msgHits.data ?? [])
+          .map((m) => m.conversation_id as string)
+          .filter((id) => id && !byId.has(id)),
+      ),
+    ];
+    if (extraIds.length > 0) {
+      const { data: extra } = await supabase
+        .from("conversations")
+        .select("id, title, updated_at")
+        .in("id", extraIds);
+      for (const c of extra ?? []) byId.set(c.id, c);
+    }
+
+    const merged = [...byId.values()]
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+      .slice(0, LIST_LIMIT);
+    return Response.json(merged);
   } catch (err) {
     console.error("[conversations:GET]", err);
     return Response.json({ error: "목록을 불러오지 못했습니다." }, { status: 500 });

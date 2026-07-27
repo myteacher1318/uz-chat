@@ -1,5 +1,6 @@
 import Anthropic, { toFile } from "@anthropic-ai/sdk";
 import { PDF_TYPE, isImageMediaType } from "@/lib/attachments";
+import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
 import type { NeutralMessage } from "./types";
 
 // Files API는 베타라 messages 호출에도 동일 베타 헤더가 필요하다.
@@ -178,14 +179,16 @@ export async function* streamClaude({
     max_tokens: maxTokens,
     system,
     betas: fallbackModel ? [FILES_BETA, FALLBACK_BETA] : [FILES_BETA],
-    // 사고(thinking): 지원 모델에서만 지정(true/false). display 기본값(omitted)
-    // 이라 사고 내용은 스트림에 노출되지 않고 답변 품질만 올라간다.
+    // 사고(thinking): 지원 모델에서만 지정(true/false).
     //   adaptive  → 필요할 때만 스스로 사고
     //   disabled  → 사고 끔 (models.ts 의 경고 참고 — 현재는 쓰지 않는다)
+    // display: "summarized" 는 사고 요약을 스트림으로 받아 화면에 보여주기 위한 것.
+    // 기본값(omitted)이면 사고 중에 아무것도 오지 않아 긴 침묵처럼 보인다.
+    // 표시 여부만 달라질 뿐 사고 수행량·과금은 동일하다.
     ...(thinking !== undefined
       ? {
           thinking: thinking
-            ? { type: "adaptive" as const }
+            ? { type: "adaptive" as const, display: "summarized" as const }
             : { type: "disabled" as const },
         }
       : {}),
@@ -218,6 +221,9 @@ export async function* streamClaude({
       messages: anthropicMessages,
     });
     let roundOutput = 0;
+    // 이 라운드에서 사고 블록인 content block 인덱스 (stop 이벤트는 타입을 안 싣는다).
+    // 블록 인덱스는 메시지마다 0부터 다시 시작하므로 라운드마다 새로 만든다.
+    const thinkingBlocks = new Set<number>();
 
     for await (const event of stream) {
       if (event.type === "message_start") {
@@ -229,9 +235,15 @@ export async function* streamClaude({
           (u.cache_creation_input_tokens ?? 0) +
           (u.cache_read_input_tokens ?? 0);
       } else if (event.type === "content_block_start") {
+        const block = event.content_block;
+        // 사고 블록 시작 — 이후 delta 는 답변 본문이 아니라 사고 요약이다.
+        // 클라이언트가 구분할 수 있도록 마커로 구간을 연다.
+        if (block.type === "thinking") {
+          thinkingBlocks.add(event.index);
+          yield THINK_OPEN;
+        }
         // web_fetch 로 읽은 페이지. 검색과 달리 인용에 URL이 실려오지 않으므로
         // 결과 블록에서 직접 꺼내 같은 출처 목록에 합친다.
-        const block = event.content_block;
         if (
           block.type === "web_fetch_tool_result" &&
           block.content.type === "web_fetch_result" &&
@@ -247,6 +259,10 @@ export async function* streamClaude({
         if (event.delta.type === "text_delta") {
           if (event.delta.text) sawText = true;
           yield event.delta.text;
+        } else if (event.delta.type === "thinking_delta") {
+          // 사고 요약 — THINK_OPEN/CLOSE 사이로 흘러가 클라이언트가 분리한다.
+          // sawText 는 건드리지 않는다 (사고만 오고 본문이 없으면 '응답 없음'이 맞다).
+          yield event.delta.thinking;
         } else if (event.delta.type === "citations_delta") {
           // 웹 검색으로 인용된 출처. 모델이 실제로 근거로 쓴 것만 들어온다
           // (검색 결과 전체가 아니라서 노이즈가 적다).
@@ -255,6 +271,9 @@ export async function* streamClaude({
             sources.set(c.url, c.title?.trim() || c.url);
           }
         }
+      } else if (event.type === "content_block_stop") {
+        // 사고 구간 닫기 (본문 블록의 stop 은 무시)
+        if (thinkingBlocks.delete(event.index)) yield THINK_CLOSE;
       } else if (event.type === "message_delta") {
         // message_delta.usage.output_tokens 는 이 메시지의 누적 출력 토큰(최종값).
         roundOutput = event.usage.output_tokens ?? roundOutput;

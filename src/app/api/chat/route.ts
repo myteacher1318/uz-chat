@@ -3,6 +3,7 @@ import { streamOpenAI } from "@/lib/ai/openai";
 import { depthParams, resolveModel, resolveThinkingDepth } from "@/lib/ai/models";
 import { getSupabase } from "@/lib/supabaseServer";
 import { INLINE_MAX_BYTES, isAllowedType } from "@/lib/attachments";
+import { stripThinking } from "@/lib/streamMarkers";
 import {
   bumpCounters,
   clientIp,
@@ -415,13 +416,17 @@ export async function POST(req: Request): Promise<Response> {
         }
       }
 
+      // 사고 요약은 화면에만 보여주고 저장하지 않는다 — 대화를 다시 열었을 때
+      // 사고가 본문에 섞여 보이면 안 되고, 히스토리로 되돌려 보낼 값도 아니다.
+      const answer = stripThinking(full);
+
       // 저장/집계는 클라이언트 연결 여부와 무관하게 수행 (부분 응답도 보존)
-      if (supabase && conversationId && full.trim()) {
+      if (supabase && conversationId && answer.trim()) {
         try {
           await supabase.from("messages").insert({
             conversation_id: conversationId,
             role: "assistant",
-            content: full,
+            content: answer,
             model,
             attachments: null,
           });
@@ -439,7 +444,7 @@ export async function POST(req: Request): Promise<Response> {
             const cid = conversationId;
             void (async () => {
               try {
-                const title = await generateTitle(lastText, full);
+                const title = await generateTitle(lastText, answer);
                 if (title) {
                   await sb
                     .from("conversations")
