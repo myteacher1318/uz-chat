@@ -29,6 +29,8 @@ services:
         sync: false
       - key: ACCESS_CODE # 대문 접속 코드(8자리 숫자) — 미설정 시 게이트 꺼짐
         sync: false
+      - key: BLOCK_FOREIGN_IPS # "1" 이면 국내 IP 대역 외 접근 차단 (미설정 시 꺼짐)
+        value: "1"
       - key: BLOB_READ_WRITE_TOKEN # 큰 파일 첨부 쓸 때만 (없으면 비워둬도 됨)
         sync: false
       - key: CRON_SECRET # 정기 정리용 (Render에선 별도 Cron 필요 — 아래 설명)
