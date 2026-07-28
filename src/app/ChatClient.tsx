@@ -830,12 +830,17 @@ export default function ChatClient() {
                     >
                       {c.title}
                     </button>
+                    {/*
+                      모바일에는 hover가 없다. hidden + group-hover:flex 로 두면
+                      터치 기기에서 삭제 버튼에 영영 닿을 수 없으므로, 메시지 액션과
+                      같은 방식으로 md 이상에서만 hover(및 키보드 포커스)로 감춘다.
+                    */}
                     <button
                       type="button"
                       onClick={() => setDeleteTarget(c)}
                       aria-label="대화 삭제"
                       title="삭제"
-                      className="mr-1 hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted hover:bg-foreground/[.06] hover:text-red-500 group-hover:flex"
+                      className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted transition-opacity hover:bg-foreground/[.06] hover:text-red-500 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
                     >
                       <IconTrash />
                     </button>
