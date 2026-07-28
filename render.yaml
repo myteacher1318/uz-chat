@@ -33,7 +33,7 @@ services:
         value: "1"
       - key: BLOB_READ_WRITE_TOKEN # 큰 파일 첨부 쓸 때만 (없으면 비워둬도 됨)
         sync: false
-      - key: CRON_SECRET # 정기 정리용 (Render에선 별도 Cron 필요 — 아래 설명)
+      - key: CRON_SECRET # 정기 정리용 — 값은 직접 정하는 임의 문자열 (아래 "정기 파일 정리" 참고)
         sync: false
 # ── 콜드 스타트 회피(keep-alive) ─────────────────────────────────────────────
 # 무료 플랜은 15분 유휴 후 잠들고, 다시 깨는 데 30~60초가 걸린다.
@@ -60,3 +60,28 @@ services:
 #
 # ⚠️ src/proxy.ts 의 matcher에 '/' 를 추가하면 이 핑과 Render 헬스체크가 함께
 #    깨진다 (해외 IP로 판정돼 403). matcher는 API 경로만 잡도록 유지할 것.
+#
+# ── 정기 파일 정리(/api/cleanup) ─────────────────────────────────────────────
+# ⚠️ vercel.json 에 크론이 정의돼 있지만 그건 Vercel 배포 전용이다. Render는
+#    vercel.json 을 읽지 않으므로, 아래 설정을 하지 않으면 정리가 아예 돌지 않는다.
+#    (JSON 은 주석을 못 달고 Vercel 이 스키마 밖 키를 거부해서 경고를 여기에 남긴다)
+#
+# 무엇을 지우나: 첨부만 하고 전송하지 않은 파일은 Anthropic Files API 에 올라간 채
+# 어떤 메시지도 참조하지 않아 영구히 남는다. 이 작업이 24시간 지난 그런 고아 파일을
+# 지운다. 대화를 삭제할 때 참조 파일은 이미 정리되므로 누락 경로는 이것뿐이다.
+# 덤으로 매일 messages 테이블을 조회하므로 Supabase 무료 플랜의 7일 유휴 정지도 막는다.
+#
+# 1) CRON_SECRET 값 만들기 — 발급받는 게 아니라 직접 정하는 임의의 문자열:
+#      node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+# 2) Render 대시보드 → 서비스 → Environment → CRON_SECRET 에 그 값을 저장
+#    (저장하면 자동 재배포되어 1~2분 끊긴다)
+# 3) cron-job.org 에 keep-alive 와 별개인 작업을 하나 더 만든다:
+#      URL     : https://<서비스>.onrender.com/api/cleanup   ← api 가 앞, cleanup 이 뒤
+#      스케줄  : 매일 1회 (예: 03:00, Asia/Seoul)
+#      헤더    : Key=Authorization  Value=Bearer <위 값>
+#                ('Bearer' 는 값 쪽에 있어야 한다. 앞뒤 공백·줄바꿈이 붙으면 401)
+#
+# 확인: 성공하면 {"totalFiles":n,"referenced":n,"deleted":n,"skipped":n,"errors":n}
+#       {"error":"unauthorized"} 면 값 불일치 또는 재배포 미완료.
+#       404 면 URL 오타 (경로는 /api/cleanup).
+# 이 경로는 proxy matcher에서 제외돼 있어 해외 크론 서비스에서 호출해도 차단되지 않는다.
