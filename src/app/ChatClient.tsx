@@ -853,8 +853,14 @@ export default function ChatClient() {
       </aside>
 
       {/* 채팅 영역 */}
+      {/*
+        min-w-0 은 필수. flex 아이템의 기본값 min-width:auto 는 내용의 최소 너비보다
+        작게 줄어들지 못하게 하는데, 긴 코드 한 줄이나 넓은 수식이 들어오면 이 칼럼이
+        화면보다 넓게 벌어진다. 상위 컨테이너가 overflow-hidden 이라 넘친 부분은
+        스크롤로도 볼 수 없고, 좌측 패딩까지 화면 밖으로 밀려 본문이 잘린다.
+      */}
       <div
-        className="relative flex flex-1 flex-col font-sans"
+        className="relative flex min-w-0 flex-1 flex-col font-sans"
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}

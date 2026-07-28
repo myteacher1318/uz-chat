@@ -97,3 +97,14 @@ body {
 .prose a:hover {
   color: var(--accent-strong);
 }
+
+/* 디스플레이 수식 — 좁은 화면에서 가로 스크롤.
+   KaTeX는 긴 수식을 줄바꿈 없이 그대로 그려서 모바일에서 화면 밖으로 넘치는데,
+   기본값(overflow: visible)이라 잘린 부분을 볼 방법이 없다. 코드블록과 같은
+   방식으로 블록 안에서만 스크롤되게 한다.
+   padding-block: 스크롤바가 수식 아래쪽 획을 가리지 않도록 여유를 준다. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.5rem;
+}
