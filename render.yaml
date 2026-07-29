@@ -85,9 +85,17 @@ services:
 #    (저장하면 자동 재배포되어 1~2분 끊긴다)
 # 3) cron-job.org 에 keep-alive 와 별개인 작업을 하나 더 만든다:
 #      URL     : https://<서비스>.onrender.com/api/cleanup   ← api 가 앞, cleanup 이 뒤
-#      스케줄  : 매일 1회 (예: 03:00, Asia/Seoul)
+#      스케줄  : 매일 1회, 07:30 (Asia/Seoul)
 #      헤더    : Key=Authorization  Value=Bearer <위 값>
 #                ('Bearer' 는 값 쪽에 있어야 한다. 앞뒤 공백·줄바꿈이 붙으면 401)
+#
+# ⚠️ 반드시 keep-alive 창(07~21시) 안에 넣을 것. 새벽 시간대에 두면 서비스가 잠들어
+#    있어 깨우는 데 25초 이상 걸리고, 그 사이 Cloudflare/Render 가 HTML 오류 페이지를
+#    돌려주면 cron-job.org 의 1KB 제한에 걸려 "output too large" 로 실패한다.
+#    (정상 응답은 401 이 24바이트, 완료 JSON 이 66바이트로 제한과 무관하다)
+#    07:00 핑이 먼저 깨워 두므로 07:30 이면 항상 준비된 상태다.
+#    요청 방식은 GET/HEAD 어느 쪽이든 된다 — 라우트가 GET 핸들러지만 Next 가 HEAD 를
+#    같은 핸들러로 넘겨 정리는 실행되고 본문만 비워진다. 결과 수치를 보려면 GET.
 #
 # 확인: 성공하면 {"totalFiles":n,"referenced":n,"deleted":n,"skipped":n,"errors":n}
 #       {"error":"unauthorized"} 면 값 불일치 또는 재배포 미완료.
