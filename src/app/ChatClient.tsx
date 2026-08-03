@@ -115,6 +115,8 @@ export default function ChatClient() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+  // 붙여넣은 이미지의 순번 — 이름 없는 클립보드 비트맵을 구분하기 위한 것
+  const pasteCounter = useRef(0);
   // 화면에 로드된 가장 오래된 메시지의 created_at — '이전 대화 더 보기' 커서
   const oldestCursor = useRef<string | null>(null);
   // 메시지 로드 세대 — 대화를 바꾸면 증가시켜, 뒤늦게 도착한 이전 대화의
@@ -737,6 +739,44 @@ export default function ChatClient() {
     if (e.dataTransfer.files?.length) void addFiles(e.dataTransfer.files);
   }
 
+  // ── 클립보드 붙여넣기 ─────────────────────────
+  // 파일 선택·드래그앤드롭과 같은 addFiles 경로를 타므로 형식·크기 검사와
+  // 인라인/Blob 분기가 그대로 적용된다. 스크린샷(Win+Shift+S 등)을 저장 없이
+  // 바로 올릴 수 있는 게 주 용도다.
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+
+      // 브라우저는 클립보드 비트맵에 이름을 안 주거나 전부 'image.png' 로 준다.
+      // 그대로 두면 첨부 목록에서 구분이 안 되므로 순번을 붙인다.
+      // 파일 관리자에서 복사한 실제 파일은 이름이 있으므로 그대로 둔다.
+      const generic = !file.name || file.name === "image.png";
+      if (!generic) {
+        files.push(file);
+        continue;
+      }
+      pasteCounter.current += 1;
+      const ext = file.type.split("/")[1]?.split("+")[0] || "png";
+      files.push(
+        new File([file], `붙여넣은 이미지 ${pasteCounter.current}.${ext}`, {
+          type: file.type,
+        }),
+      );
+    }
+
+    // 이미지가 없으면 기본 동작(텍스트 붙여넣기)을 막지 않는다.
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addFiles(files);
+  }
+
   const isEmpty = messages.length === 0;
   const uploading = pending.some((p) => p.uploading);
   const canSend =
@@ -993,6 +1033,7 @@ export default function ChatClient() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
+                onPaste={onPaste}
                 disabled={loading}
                 rows={1}
                 placeholder="무엇이든 물어보세요"
