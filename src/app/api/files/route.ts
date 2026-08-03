@@ -1,6 +1,6 @@
 import { del } from "@vercel/blob";
 import { uploadToAnthropicFiles } from "@/lib/ai/claude";
-import { isAllowedType, MAX_FILE_BYTES } from "@/lib/attachments";
+import { formatBytes, isAllowedType, maxBytesFor } from "@/lib/attachments";
 import { getSupabase } from "@/lib/supabaseServer";
 import { bumpCounters } from "@/lib/usage";
 
@@ -61,10 +61,12 @@ export async function POST(req: Request): Promise<Response> {
   }
   const buf = Buffer.from(await res.arrayBuffer());
 
-  if (buf.length > MAX_FILE_BYTES) {
+  // 텍스트는 상한이 더 낮다 — 내용이 그대로 토큰이 되기 때문 (attachments.ts 참고)
+  const limit = maxBytesFor(mediaType);
+  if (buf.length > limit) {
     await del(url).catch(() => {});
     return Response.json(
-      { error: "파일이 너무 큽니다. (최대 32MB)" },
+      { error: `파일이 너무 큽니다. (최대 ${formatBytes(limit)})` },
       { status: 400 },
     );
   }

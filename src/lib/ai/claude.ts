@@ -1,5 +1,10 @@
 import Anthropic, { toFile } from "@anthropic-ai/sdk";
-import { PDF_TYPE, isImageMediaType } from "@/lib/attachments";
+import {
+  PDF_TYPE,
+  TEXT_TYPE,
+  isImageMediaType,
+  isTextMediaType,
+} from "@/lib/attachments";
 import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
 import type { NeutralMessage } from "./types";
 
@@ -71,6 +76,18 @@ function toAnthropicMessage(m: NeutralMessage): Anthropic.Beta.BetaMessageParam 
         blocks.push({
           type: "image",
           source: { type: "base64", media_type: a.mediaType, data: a.data },
+        });
+      } else if (isTextMediaType(a.mediaType)) {
+        // 텍스트 문서는 base64가 아니라 평문 소스로 보낸다. title 을 주면
+        // 모델이 어느 파일 내용인지 알 수 있다 (여러 개 붙였을 때 특히).
+        blocks.push({
+          type: "document",
+          title: a.name,
+          source: {
+            type: "text",
+            media_type: TEXT_TYPE,
+            data: Buffer.from(a.data, "base64").toString("utf8"),
+          },
         });
       } else {
         blocks.push({

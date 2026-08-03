@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { isImageMediaType } from "@/lib/attachments";
+import { isImageMediaType, isTextMediaType } from "@/lib/attachments";
 import type { NeutralMessage } from "./types";
 
 export interface StreamOptions {
@@ -53,6 +53,13 @@ function toResponseMessage(m: NeutralMessage): OpenAI.Responses.ResponseInputIte
         type: "input_file",
         filename: a.name,
         file_data: `data:application/pdf;base64,${a.data}`,
+      });
+    } else if (isTextMediaType(a.mediaType)) {
+      // 텍스트는 별도 첨부 형식 없이 본문에 끼워 넣는다. 파일명을 함께 적어
+      // 모델이 어느 파일 내용인지 구분할 수 있게 한다.
+      parts.push({
+        type: "input_text",
+        text: `[첨부 파일: ${a.name}]\n${Buffer.from(a.data, "base64").toString("utf8")}`,
       });
     }
   }
