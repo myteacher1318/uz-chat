@@ -5,8 +5,9 @@ import { upload } from "@vercel/blob/client";
 import {
   ACCEPT,
   INLINE_MAX_BYTES,
-  MAX_FILE_BYTES,
+  formatBytes,
   isAllowedType,
+  maxBytesFor,
 } from "@/lib/attachments";
 import {
   MODELS,
@@ -16,6 +17,11 @@ import {
 } from "@/lib/ai/models";
 import Markdown from "./Markdown";
 import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
+
+// 이 거리 안이면 '바닥에 있다'고 본다. 자동 따라가기 여부와 '맨 아래로' 버튼
+// 노출을 함께 결정한다. 너무 크면 위로 조금 올려도 계속 끌려가고, 너무 작으면
+// 바닥에 있어도 따라가지 않는다.
+const BOTTOM_GAP_PX = 80;
 
 type Conversation = { id: string; title: string; updated_at: string };
 
@@ -108,9 +114,10 @@ export default function ChatClient() {
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  const bottomRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const stickToBottom = useRef(true); // 사용자가 바닥 근처에 있을 때만 자동 스크롤
+  // '맨 아래로' 버튼 노출용 — 자동 스크롤 판단은 위 ref 가, 화면 표시는 이 state 가 맡는다
+  const [atBottom, setAtBottom] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,16 +148,39 @@ export default function ChatClient() {
 
   // 자동 스크롤 — 사용자가 위로 스크롤해 읽는 중이면 방해하지 않는다.
   useEffect(() => {
-    if (stickToBottom.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "auto" });
-    }
+    if (!stickToBottom.current) return;
+    const el = mainRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  function nearBottom(el: HTMLElement) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_GAP_PX;
+  }
 
   function onMainScroll() {
     const el = mainRef.current;
     if (!el) return;
-    stickToBottom.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const near = nearBottom(el);
+    stickToBottom.current = near;
+    setAtBottom((prev) => (prev === near ? prev : near));
+  }
+
+  // 휠·터치는 "사용자가 직접 스크롤을 잡았다"는 확실한 신호다. 위치만으로 판단하면
+  // 자동 따라가기가 일으킨 scroll 이벤트와 구분되지 않아, 위로 올려도 다음 토큰이
+  // 도착하는 순간 다시 바닥으로 끌려갈 수 있다. 여기서 먼저 끊어 준다.
+  function onUserScrollIntent() {
+    const el = mainRef.current;
+    if (el && !nearBottom(el)) stickToBottom.current = false;
+  }
+
+  function scrollToBottom() {
+    const el = mainRef.current;
+    if (!el) return;
+    // atBottom 은 여기서 미리 켜지 않는다. 스크롤이 실제로 끝났을 때 onMainScroll
+    // 이 갱신하게 두어야, 스크롤이 중간에 막히거나 취소돼도 버튼만 사라지고
+    // 위치는 그대로인 상태가 생기지 않는다.
+    stickToBottom.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }
 
   useEffect(() => {
@@ -321,14 +351,19 @@ export default function ChatClient() {
   // ── 첨부 ──────────────────────────────────────
   async function addFiles(list: FileList | File[]) {
     const files = Array.from(list);
+    // 이전 오류는 여기서 한 번만 지운다. 아래 성공 경로에서 매번 지우면,
+    // 정상 파일과 거부된 파일을 함께 넣었을 때 거부 사유가 화면에 남지 않는다.
+    setAttachError(null);
 
     for (const file of files) {
       if (!isAllowedType(file.type)) {
         setAttachError(`지원하지 않는 형식입니다: ${file.name}`);
         continue;
       }
-      if (file.size > MAX_FILE_BYTES) {
-        setAttachError(`32MB를 초과했습니다: ${file.name}`);
+      // 텍스트는 내용이 그대로 토큰이 되므로 상한이 더 낮다 (attachments.ts 참고)
+      const limit = maxBytesFor(file.type);
+      if (file.size > limit) {
+        setAttachError(`${formatBytes(limit)}를 초과했습니다: ${file.name}`);
         continue;
       }
 
@@ -344,7 +379,6 @@ export default function ChatClient() {
             ...prev,
             { id, name: file.name, mediaType: file.type, size: file.size, data, previewUrl },
           ]);
-          setAttachError(null);
         } catch {
           if (previewUrl) URL.revokeObjectURL(previewUrl);
           setAttachError(`파일을 읽지 못했습니다: ${file.name}`);
@@ -354,7 +388,6 @@ export default function ChatClient() {
           ...prev,
           { id, name: file.name, mediaType: file.type, size: file.size, previewUrl, uploading: true },
         ]);
-        setAttachError(null);
         try {
           const blob = await upload(file.name, file, {
             access: "public",
@@ -929,6 +962,8 @@ export default function ChatClient() {
         <main
           ref={mainRef}
           onScroll={onMainScroll}
+          onWheel={onUserScrollIntent}
+          onTouchMove={onUserScrollIntent}
           className="nice-scroll flex-1 overflow-y-auto"
         >
           <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 py-8">
@@ -989,9 +1024,21 @@ export default function ChatClient() {
                 </div>
               )}
 
-            <div ref={bottomRef} />
           </div>
         </main>
+
+        {/* 맨 아래로 — 위로 올려 읽는 중일 때만 나타난다 */}
+        {!atBottom && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            aria-label="맨 아래로"
+            title="맨 아래로"
+            className="absolute bottom-32 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-line bg-raised text-muted shadow-[0_2px_8px_rgba(0,0,0,0.14)] transition-colors hover:border-accent/40 hover:text-accent"
+          >
+            <IconArrowDown />
+          </button>
+        )}
 
         {/* 입력 영역 */}
         <footer className="px-4 pb-4 pt-1">
@@ -1401,6 +1448,14 @@ function IconGlobe() {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
       <circle cx="12" cy="12" r="9" />
       <path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18" />
+    </svg>
+  );
+}
+
+function IconArrowDown() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 5v14m7-7-7 7-7-7" />
     </svg>
   );
 }
