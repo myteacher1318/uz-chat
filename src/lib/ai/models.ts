@@ -8,15 +8,16 @@ export type ModelDef = {
   label: string; // 드롭다운에 보이는 이름
   provider: Provider;
   maxTokens: number; // 최대 출력 토큰 — 반드시 해당 모델의 출력 한도 이내여야 함
-  // adaptive thinking 지원 모델(Sonnet 4.6+/Opus 4.6+)에서만 true.
+  // adaptive thinking 지원 모델(Sonnet 4.6+/Opus 4.6+/Fable)에서만 true.
   // Haiku 4.5는 adaptive 미지원이라 켜면 400 오류.
   adaptiveThinking?: boolean;
   // 안전 분류기가 요청을 거절(stop_reason: "refusal")했을 때 서버가 대신 실행할 모델.
-  // Opus 5처럼 보안 안전장치가 강화된 모델에만 지정한다. 지정하면 거절된 요청이
-  // 빈 응답으로 끝나지 않고 이 모델이 이어서 답한다.
+  // Opus 5.5·Fable 5.1처럼 보안 안전장치가 강화된 모델에만 지정한다. 지정하면 거절된
+  // 요청이 빈 응답으로 끝나지 않고 이 모델이 이어서 답한다.
+  // 서버가 받아주는 폴백 대상은 claude-opus-4-8 / claude-opus-5 뿐이다(그 외는 400).
   fallbackModel?: string;
   // 웹 서버 도구(web_search/web_fetch) 세대 — Anthropic 모델 전용.
-  //   "latest" → _20260209 계열(동적 필터링 포함). Opus 4.6+/Sonnet 4.6+ 에서만 동작한다.
+  //   "latest" → _20260209 계열(동적 필터링 포함). Opus 4.6+/Sonnet 4.6+/Fable 5.1 에서만 동작한다.
   //   "basic"  → web_search_20250305 만. Haiku 4.5 처럼 이전 세대 모델용
   //              (이 세대에 _20260209 를 보내면 400).
   // 미지정이면 웹 도구를 붙이지 않는다. GPT 계열은 openai.ts 가 따로 처리한다.
@@ -24,14 +25,19 @@ export type ModelDef = {
 };
 
 // maxTokens는 채팅에선 사실상 넉넉한 값(32K ≈ 한글 2만자 이상).
-// GPT-5.6 패밀리(2026-07-09 출시, Sol/Terra/Luna)는 최대 출력 128K라 여유 있음.
-// 비용/사용량은 추후 /admin에서 모니터링해 조정.
+// Haiku 4.5 를 뺀 모든 모델(Claude 5 세대, GPT-6 패밀리)은 최대 출력 128K라 여유 있음.
+// Opus 5.5·Fable 5.1 은 사고가 항상 켜져 있어 사고 토큰도 이 한도에 포함된다.
+// 비용/사용량은 /admin에서 모니터링해 조정.
+// 입력/출력 $/1M 토큰 — Sonnet 5 $2/$10, Opus 5.5 $4/$20, Fable 5.1 $10/$50,
+// Haiku 4.5 $1/$5, GPT-6 Sol $2/$10, Astra $10/$50, Luna $0.1/$0.5.
 export const MODELS: ModelDef[] = [
   { id: "claude-sonnet-5", label: "Claude Sonnet 5 (균형)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, webTools: "latest" },
-  { id: "claude-opus-5", label: "Claude Opus 5 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8", webTools: "latest" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (고품질)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8", webTools: "latest" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1 (최고 성능·고비용)", provider: "anthropic", maxTokens: 32000, adaptiveThinking: true, fallbackModel: "claude-opus-4-8", webTools: "latest" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (빠름/저렴)", provider: "anthropic", maxTokens: 32000, webTools: "basic" },
-  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (최신 고성능)", provider: "openai", maxTokens: 32000 },
-  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (빠름/저렴)", provider: "openai", maxTokens: 32000 },
+  { id: "gpt-6-sol", label: "GPT-6 Sol (고성능)", provider: "openai", maxTokens: 32000 },
+  { id: "gpt-6-astra", label: "GPT-6 Astra (최고 성능·고비용)", provider: "openai", maxTokens: 32000 },
+  { id: "gpt-6-luna", label: "GPT-6 Luna (빠름/저렴)", provider: "openai", maxTokens: 32000 },
 ];
 
 export const DEFAULT_MODEL = "claude-sonnet-5";
@@ -43,7 +49,7 @@ export function resolveModel(id: string | undefined): ModelDef {
 }
 
 // ── 사고 깊이(thinking depth) ─────────────────────────────
-// Sonnet 5 / Opus 4.8 등 adaptive thinking 지원 모델에서만 의미가 있다.
+// Sonnet 5 / Opus 5.5 / Fable 5.1 등 adaptive thinking 지원 모델에서만 의미가 있다.
 // API로는 두 파라미터로 표현된다:
 //   - thinking: adaptive(켬) / disabled(끔)
 //   - output_config.effort: 사고·응답 토큰 예산 (low|medium|high…)
@@ -71,6 +77,8 @@ export type DepthParams = { thinking: boolean; effort: Effort };
 // 두 모델 모두 "사고를 끄기보다 effort를 낮추라"가 권장 대응이고, low effort만으로도
 // 지연·토큰 절감 효과는 대부분 얻는다. 사고 끄기가 꼭 필요하면 thinking: false 로 되돌리되
 // 위 위험을 감수해야 한다.
+// ⚠️ 단, Opus 5.5·Fable 5.1 은 사고를 끌 수 없다 — thinking: disabled 를 보내면 400.
+//    이 두 모델이 목록에 있는 한 어떤 깊이에서도 thinking: false 를 쓰면 안 된다.
 const DEPTH_PARAMS: Record<ThinkingDepth, DepthParams> = {
   fast: { thinking: true, effort: "low" }, // 적응형 사고 + 낮음 — 가장 빠름
   standard: { thinking: true, effort: "medium" }, // 적응형 사고 + 중간

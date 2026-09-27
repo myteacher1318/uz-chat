@@ -24,7 +24,7 @@ export interface StreamOptions {
   maxTokens: number;
   // 사고(thinking) 사용 여부 — adaptive thinking 지원 모델에서만 지정할 것.
   //   true  → thinking: adaptive (모델이 필요할 때 스스로 사고)
-  //   false → thinking: disabled (사고 끔 — 가장 빠름)
+  //   false → thinking: disabled (사고 끔 — 가장 빠름. Opus 5.5·Fable 5.1 은 400)
   //   undefined → 파라미터 미전송 (Haiku 등 미지원 모델용)
   thinking?: boolean;
   // 사고 깊이 → output_config.effort. thinking과 마찬가지로 지원 모델에서만.
@@ -34,7 +34,7 @@ export interface StreamOptions {
   // 웹 서버 도구 세대 — models.ts 의 ModelDef.webTools 를 그대로 넘긴다.
   // 미지정이면 webSearch 가 true 여도 도구를 붙이지 않는다(해당 모델이 미지원).
   webTools?: "latest" | "basic";
-  // 안전 분류기가 요청을 거절했을 때 서버가 대신 실행할 모델 (Opus 5 등).
+  // 안전 분류기가 요청을 거절했을 때 서버가 대신 실행할 모델 (Opus 5.5·Fable 5.1 등).
   // 미지정이면 폴백 없이 거절이 그대로 반환된다.
   fallbackModel?: string;
   // 프롬프트 캐싱 사용 여부 (Anthropic 전용). 히스토리가 append-only 인
@@ -109,7 +109,7 @@ const WEB_FETCH_MAX_TOKENS = 30000;
 
 /**
  * 모델 세대에 맞는 웹 서버 도구 목록.
- * _20260209 계열은 Opus 4.6+/Sonnet 4.6+ 에서만 동작하므로, 이전 세대 모델에는
+ * _20260209 계열은 Opus 4.6+/Sonnet 4.6+/Fable 5.1 에서만 동작하므로, 이전 세대 모델에는
  * 기본 변형(web_search_20250305)만 준다. web_fetch 는 최신 세대에만 붙인다.
  */
 function webToolsFor(tier: "latest" | "basic" | undefined) {
