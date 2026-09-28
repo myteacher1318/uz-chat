@@ -354,6 +354,7 @@ export function JobPanel({
   clearError,
   onClear,
   onEditResult,
+  details,
 }: {
   kind: JobKind;
   job: JobView;
@@ -362,6 +363,8 @@ export function JobPanel({
   onClear: () => void;
   // 이미지 결과를 원본으로 삼아 이어서 편집 (이미지 화면만 넘긴다)
   onEditResult?: (r: ResultItem) => void;
+  // 상태 아래에 덧붙일 내용 (이미지 화면의 '보낸 편집 정보')
+  details?: React.ReactNode;
 }) {
   const [zoomed, setZoomed] = useState<ResultItem | null>(null);
   const closeZoom = useCallback(() => setZoomed(null), []);
@@ -396,6 +399,7 @@ export function JobPanel({
           {job.note}
         </p>
       )}
+      {details}
 
       {job.results.length > 0 && (
         <ul className="mt-4 flex flex-col gap-4">

@@ -16,9 +16,12 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState } from "r
 type Point = { x: number; y: number };
 type Stroke = { erase: boolean; size: number; points: Point[] }; // size·좌표 모두 원본 픽셀 단위
 
+/** 내보낸 마스크와, 화면에 '보낸 편집 정보'로 보여 줄 크기·칠한 비율 */
+export type ExportedMask = { blob: Blob; width: number; height: number; whiteRatio: number };
+
 export type MaskEditorHandle = {
   /** 칠한 곳이 없으면 null. 원본이 너무 커서 만들 수 없으면 throw. */
-  exportMask: () => Promise<Blob | null>;
+  exportMask: () => Promise<ExportedMask | null>;
 };
 
 // iOS Safari 의 캔버스 면적 상한. 넘으면 캔버스가 조용히 비어 버린다.
@@ -212,21 +215,22 @@ export default function MaskEditor({
           // 모두 지워 흰 픽셀이 하나도 없으면 '칠한 곳 없음'으로 본다.
           const img = ctx.getImageData(0, 0, nat.w, nat.h);
           const px = img.data;
-          let any = false;
+          let white = 0;
           for (let i = 0; i < px.length; i += 4) {
             const v = px[i] >= 128 ? 255 : 0;
-            if (v) any = true;
+            if (v) white++;
             px[i] = px[i + 1] = px[i + 2] = v;
             px[i + 3] = 255;
           }
-          if (!any) return null;
+          if (white === 0) return null;
           ctx.putImageData(img, 0, 0);
-          return await new Promise<Blob>((resolve, reject) => {
+          const blob = await new Promise<Blob>((resolve, reject) => {
             canvas.toBlob(
               (b) => (b ? resolve(b) : reject(new Error("mask export failed"))),
               "image/png",
             );
           });
+          return { blob, width: nat.w, height: nat.h, whiteRatio: white / (nat.w * nat.h) };
         } finally {
           canvas.width = canvas.height = 0; // 큰 캔버스 메모리를 바로 놓는다
         }

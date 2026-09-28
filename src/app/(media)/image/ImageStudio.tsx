@@ -1,10 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { bakeOrientation } from "@/lib/imageOrientation";
 import { MEDIA_IMAGE_TYPES, MEDIA_MAX_FILE_BYTES, extensionFor } from "@/lib/mediaApi";
 import { useMedia, type ResultItem } from "../MediaProvider";
-import MaskEditor, { type MaskEditorHandle } from "./MaskEditor";
+import MaskEditor, { type ExportedMask, type MaskEditorHandle } from "./MaskEditor";
 import {
   Card,
   Choice,
@@ -50,6 +50,23 @@ const STRENGTH_MIN = 5;
 const STRENGTH_MAX = 100;
 const STRENGTH_DEFAULT = 65;
 
+// 방금 보낸 편집 요청의 요약 — 결과 칸에 '보낸 편집 정보'로 보여 준다. 실제로 전송된
+// 마스크를 눈으로 확인할 수 있게 해서, 결과가 이상할 때 웹과 서버 중 어디 문제인지
+// 가릴 수 있다. 메모리에만 두고 작업을 지우면 함께 사라진다.
+type SentEdit = {
+  strength: number;
+  aspect: string; // 화면 표기 (예: "1:1")
+  count: number;
+  quality: string;
+  source: { w: number; h: number } | null;
+  sourceType: string;
+  mask: ExportedMask | null;
+  maskRequested: boolean; // 부분 편집을 켰는지 (켰는데 mask 가 없으면 칠한 곳이 없었던 것)
+};
+type SentView = Omit<SentEdit, "mask"> & {
+  mask: { url: string; width: number; height: number; whiteRatio: number } | null;
+};
+
 // 스타일은 서버 옵션이 아니라, 제출할 때 프롬프트 끝에 붙이는 문구다.
 // 이미지 모델은 대개 영어 스타일 문구를 가장 잘 따르므로 영어로 둔다.
 const STYLES: { value: Style; label: string; phrase: string }[] = [
@@ -88,6 +105,40 @@ function closestAspect(w: number, h: number): Aspect {
   return best;
 }
 
+/** 결과 칸에 붙는 '보낸 편집 정보' — 실제로 전송한 마스크 미리보기와 수치 */
+function SentDetails({ sent }: { sent: SentView }) {
+  const size = (s: { w: number; h: number } | null) => (s ? `${s.w}×${s.h}` : "크기 확인 불가");
+  const mismatch =
+    sent.mask && sent.source && (sent.mask.width !== sent.source.w || sent.mask.height !== sent.source.h);
+  return (
+    <div className="mt-3 flex items-center gap-3 rounded-xl border border-line bg-surface/60 p-2.5 text-xs text-muted">
+      {sent.mask && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={sent.mask.url}
+          alt="보낸 마스크 (흰색 = 바꿀 영역)"
+          className="h-14 w-14 shrink-0 rounded-md border border-line bg-black object-contain"
+        />
+      )}
+      <div className="min-w-0 leading-relaxed">
+        <p className="font-medium text-foreground/80">보낸 편집 정보</p>
+        <p>
+          원본 {size(sent.source)} {sent.sourceType.replace("image/", "").toUpperCase()} · 편집 강도{" "}
+          {sent.strength}% · 비율 {sent.aspect} · {sent.count}장 · {sent.quality}
+        </p>
+        <p>
+          {sent.mask
+            ? `마스크 ${sent.mask.width}×${sent.mask.height} · 칠한 영역 ${(sent.mask.whiteRatio * 100).toFixed(2)}%`
+            : sent.maskRequested
+              ? "칠한 곳이 없어 마스크 없이 이미지 전체를 편집했습니다"
+              : "마스크 없음 · 이미지 전체 편집"}
+        </p>
+        {mismatch && <p className="text-red-500">마스크와 원본 크기가 다릅니다</p>}
+      </div>
+    </div>
+  );
+}
+
 export default function ImageStudio() {
   const { adminKey, jobs, start, clear } = useMedia();
   const job = jobs.image;
@@ -102,6 +153,8 @@ export default function ImageStudio() {
   const [maskOn, setMaskOn] = useState(false);
   const [maskPainted, setMaskPainted] = useState(false);
   const maskRef = useRef<MaskEditorHandle>(null);
+  const [sent, setSent] = useState<SentView | null>(null);
+  const sentUrlRef = useRef<string | null>(null);
   const source = usePickedImages(1);
   const fileInput = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -144,6 +197,31 @@ export default function ImageStudio() {
     setMaskPainted(false);
   }
 
+  // 보낸 편집 정보 표시·해제. 마스크 미리보기 object URL 은 하나만 유지한다.
+  function showSent(d: SentEdit | null) {
+    if (sentUrlRef.current) URL.revokeObjectURL(sentUrlRef.current);
+    sentUrlRef.current = null;
+    if (!d) {
+      setSent(null);
+      return;
+    }
+    let mask: SentView["mask"] = null;
+    if (d.mask) {
+      const url = URL.createObjectURL(d.mask.blob);
+      sentUrlRef.current = url;
+      mask = { url, width: d.mask.width, height: d.mask.height, whiteRatio: d.mask.whiteRatio };
+    }
+    setSent({ ...d, mask });
+  }
+
+  const hideSent = () => showSent(null);
+
+  useEffect(() => {
+    return () => {
+      if (sentUrlRef.current) URL.revokeObjectURL(sentUrlRef.current);
+    };
+  }, []);
+
   function removeSource(key: string) {
     sizeToken.current++;
     setAspectNote(null);
@@ -167,9 +245,10 @@ export default function ImageStudio() {
     form.append("aspect", aspect);
     form.append("quality", quality);
     form.append("n", String(count));
+    let sentDraft: SentEdit | null = null;
     if (editing) {
       // 칠한 곳이 없으면 null — 그때는 mask 없이 이미지 전체를 편집한다.
-      let mask: Blob | null = null;
+      let mask: ExportedMask | null = null;
       let sourceFile = source.items[0].file;
       if (maskOn) {
         try {
@@ -185,12 +264,28 @@ export default function ImageStudio() {
       }
       form.append("source", sourceFile);
       form.append("edit_strength", String(strength / 100));
-      if (mask) form.append("mask", mask, "mask.png");
+      if (mask) form.append("mask", mask.blob, "mask.png");
+      sentDraft = {
+        strength,
+        aspect: ASPECTS.find((a) => a.value === aspect)?.label ?? aspect,
+        count,
+        quality: QUALITIES.find((q) => q.value === quality)?.label ?? quality,
+        source: await readImageSize(sourceFile),
+        sourceType: sourceFile.type,
+        mask: mask
+          ? { blob: mask.blob, width: mask.width, height: mask.height, whiteRatio: mask.whiteRatio }
+          : null,
+        maskRequested: maskOn,
+      };
     }
     const r = await start("image", form);
     setSubmitting(false);
-    if (r.ok) setPrompt(""); // 제출에 성공하면 화면에서도 프롬프트를 바로 비운다
-    else setFormError(r.message);
+    if (r.ok) {
+      setPrompt(""); // 제출에 성공하면 화면에서도 프롬프트를 바로 비운다
+      showSent(sentDraft);
+    } else {
+      setFormError(r.message);
+    }
   }
 
   async function onClear() {
@@ -206,6 +301,7 @@ export default function ImageStudio() {
     sizeToken.current++;
     setAspectNote(null);
     resetEditOptions();
+    hideSent();
     source.reset();
     if (fileInput.current) fileInput.current.value = "";
   }
@@ -244,6 +340,7 @@ export default function ImageStudio() {
       return;
     }
     resetEditOptions();
+    hideSent();
     source.reset();
     if (fileInput.current) fileInput.current.value = "";
     addSource([file]);
@@ -378,6 +475,7 @@ export default function ImageStudio() {
           clearError={clearError}
           onClear={onClear}
           onEditResult={editFromResult}
+          details={sent && <SentDetails sent={sent} />}
         />
       )}
     </>
