@@ -15,7 +15,9 @@ import {
   DEFAULT_THINKING_DEPTH,
   type ThinkingDepth,
 } from "@/lib/ai/models";
+import HeaderBrand from "./HeaderBrand";
 import Markdown from "./Markdown";
+import SectionNav from "./SectionNav";
 import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
 
 // 이 거리 안이면 '바닥에 있다'고 본다. 자동 따라가기 여부와 '맨 아래로' 버튼
@@ -949,13 +951,8 @@ export default function ChatClient() {
           >
             <IconMenu />
           </button>
-          <span className="flex h-7 w-7 select-none items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-strong text-[11px] font-bold text-white shadow-[0_1px_3px_rgba(0,0,0,0.12)]">
-            UZ
-          </span>
-          <h1 className="text-[15px] font-semibold tracking-tight">UZ Chat</h1>
-          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
-            우찌 전용
-          </span>
+          <HeaderBrand />
+          <SectionNav current="chat" />
         </header>
 
         {/* 메시지 영역 */}
