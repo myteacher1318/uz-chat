@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { bakeOrientation } from "@/lib/imageOrientation";
 import { MEDIA_IMAGE_TYPES, MEDIA_MAX_FILE_BYTES, extensionFor } from "@/lib/mediaApi";
 import { useMedia, type ResultItem } from "../MediaProvider";
+import { compareResult, type Comparison } from "./compareResult";
 import MaskEditor, { type ExportedMask, type MaskEditorHandle } from "./MaskEditor";
 import {
   Card,
@@ -60,11 +61,12 @@ type SentEdit = {
   quality: string;
   source: { w: number; h: number } | null;
   sourceType: string;
+  sourceBlob: Blob; // 받은 결과와 비교할 때 쓴다
   mask: ExportedMask | null;
   maskRequested: boolean; // 부분 편집을 켰는지 (켰는데 mask 가 없으면 칠한 곳이 없었던 것)
 };
 type SentView = Omit<SentEdit, "mask"> & {
-  mask: { url: string; width: number; height: number; whiteRatio: number } | null;
+  mask: { url: string; width: number; height: number; whiteRatio: number; blob: Blob } | null;
 };
 
 // 스타일은 서버 옵션이 아니라, 제출할 때 프롬프트 끝에 붙이는 문구다.
@@ -105,8 +107,27 @@ function closestAspect(w: number, h: number): Aspect {
   return best;
 }
 
-/** 결과 칸에 붙는 '보낸 편집 정보' — 실제로 전송한 마스크 미리보기와 수치 */
-function SentDetails({ sent }: { sent: SentView }) {
+function describeComparison(c: Comparison, hasMask: boolean): string {
+  if (c.sameFile) return "원본과 바이트까지 똑같은 파일입니다 (서버가 원본을 그대로 돌려줌)";
+  if (c.sizeMismatch) return `원본과 크기가 다릅니다 (결과 ${c.sizeMismatch})`;
+  const fmt = (v: number | null) => (v === null ? "-" : v.toFixed(1));
+  const changed = hasMask ? c.inside : c.outside;
+  const verdict = changed !== null && changed < 2 ? " → 사실상 바뀌지 않았습니다" : "";
+  return hasMask
+    ? `칠한 영역 평균 변화 ${fmt(c.inside)} · 바깥 ${fmt(c.outside)}${verdict}`
+    : `전체 평균 변화 ${fmt(c.outside)}${verdict}`;
+}
+
+/** 결과 칸에 붙는 '보낸 편집 정보' — 실제로 전송한 마스크 미리보기와 수치, 결과 비교 */
+function SentDetails({
+  sent,
+  results,
+  comparisons,
+}: {
+  sent: SentView;
+  results: ResultItem[];
+  comparisons: Record<string, Comparison | "error">;
+}) {
   const size = (s: { w: number; h: number } | null) => (s ? `${s.w}×${s.h}` : "크기 확인 불가");
   const mismatch =
     sent.mask && sent.source && (sent.mask.width !== sent.source.w || sent.mask.height !== sent.source.h);
@@ -134,6 +155,30 @@ function SentDetails({ sent }: { sent: SentView }) {
               : "마스크 없음 · 이미지 전체 편집"}
         </p>
         {mismatch && <p className="text-red-500">마스크와 원본 크기가 다릅니다</p>}
+        {results.length > 0 && (
+          <div className="mt-1.5 border-t border-line pt-1.5">
+            {results.map((r) => {
+              const c = comparisons[r.objectUrl];
+              return (
+                <div key={r.objectUrl}>
+                  <p>
+                    결과 {r.index + 1}:{" "}
+                    {c === undefined
+                      ? "원본과 비교 중…"
+                      : c === "error"
+                        ? "원본과 비교하지 못했습니다"
+                        : describeComparison(c, !!sent.mask)}
+                  </p>
+                  {c && c !== "error" && (
+                    <p className="font-mono text-[11px]">
+                      원본 #{c.sourceHash} · 결과 #{c.resultHash}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -155,6 +200,10 @@ export default function ImageStudio() {
   const maskRef = useRef<MaskEditorHandle>(null);
   const [sent, setSent] = useState<SentView | null>(null);
   const sentUrlRef = useRef<string | null>(null);
+  // 결과별 원본 비교 (키: 결과 object URL). 결과가 도착하는 대로 한 번씩 계산한다.
+  const [comparisons, setComparisons] = useState<Record<string, Comparison | "error">>({});
+  const comparedRef = useRef(new Set<string>());
+  const compareGen = useRef(0);
   const source = usePickedImages(1);
   const fileInput = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -201,6 +250,10 @@ export default function ImageStudio() {
   function showSent(d: SentEdit | null) {
     if (sentUrlRef.current) URL.revokeObjectURL(sentUrlRef.current);
     sentUrlRef.current = null;
+    // 이전 요청의 비교 결과는 버리고, 늦게 끝나는 비교도 무시되게 세대를 올린다.
+    compareGen.current++;
+    comparedRef.current = new Set();
+    setComparisons({});
     if (!d) {
       setSent(null);
       return;
@@ -209,7 +262,7 @@ export default function ImageStudio() {
     if (d.mask) {
       const url = URL.createObjectURL(d.mask.blob);
       sentUrlRef.current = url;
-      mask = { url, width: d.mask.width, height: d.mask.height, whiteRatio: d.mask.whiteRatio };
+      mask = { url, ...d.mask };
     }
     setSent({ ...d, mask });
   }
@@ -221,6 +274,25 @@ export default function ImageStudio() {
       if (sentUrlRef.current) URL.revokeObjectURL(sentUrlRef.current);
     };
   }, []);
+
+  // 편집 결과가 도착하는 대로 보낸 원본과 비교한다 (결과마다 한 번).
+  const results = job?.results;
+  useEffect(() => {
+    if (!sent || !results) return;
+    const gen = compareGen.current;
+    for (const r of results) {
+      if (comparedRef.current.has(r.objectUrl)) continue;
+      comparedRef.current.add(r.objectUrl);
+      compareResult(sent.sourceBlob, r.blob, sent.mask?.blob ?? null).then(
+        (c) => {
+          if (gen === compareGen.current) setComparisons((m) => ({ ...m, [r.objectUrl]: c }));
+        },
+        () => {
+          if (gen === compareGen.current) setComparisons((m) => ({ ...m, [r.objectUrl]: "error" }));
+        },
+      );
+    }
+  }, [sent, results]);
 
   function removeSource(key: string) {
     sizeToken.current++;
@@ -272,6 +344,7 @@ export default function ImageStudio() {
         quality: QUALITIES.find((q) => q.value === quality)?.label ?? quality,
         source: await readImageSize(sourceFile),
         sourceType: sourceFile.type,
+        sourceBlob: sourceFile,
         mask: mask
           ? { blob: mask.blob, width: mask.width, height: mask.height, whiteRatio: mask.whiteRatio }
           : null,
@@ -475,7 +548,9 @@ export default function ImageStudio() {
           clearError={clearError}
           onClear={onClear}
           onEditResult={editFromResult}
-          details={sent && <SentDetails sent={sent} />}
+          details={sent && (
+            <SentDetails sent={sent} results={job.results} comparisons={comparisons} />
+          )}
         />
       )}
     </>
