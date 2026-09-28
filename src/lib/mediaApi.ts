@@ -53,17 +53,79 @@ export class MediaApiError extends Error {
   }
 }
 
-// 서버가 정한 오류 코드(private_queue_busy 등)만 꺼낸다. 응답 본문의 다른 내용은
-// 버린다 — 입력 검증 오류가 요청 값(프롬프트)을 되돌려 줄 수 있어서다.
+type Obj = Record<string, unknown>;
+const field = (v: unknown, k: string): unknown =>
+  v && typeof v === "object" && !Array.isArray(v) ? (v as Obj)[k] : undefined;
+
+// 서버가 정한 오류 코드(private_queue_busy 등)를 꺼낸다.
 function pickCode(d: unknown): string | null {
-  const o = (d ?? {}) as Record<string, unknown>;
-  const nested = (v: unknown) =>
-    v && typeof v === "object" ? (v as Record<string, unknown>).code : undefined;
-  const candidates = [nested(o.error), o.code, o.error, nested(o.detail), o.detail];
+  const o = (d ?? {}) as Obj;
+  const candidates = [
+    field(o.error, "code"),
+    o.code,
+    o.error,
+    field(o.detail, "code"),
+    field(o.detail, "error"),
+    o.detail,
+  ];
   for (const c of candidates) {
     if (typeof c === "string" && /^[a-z0-9_]{1,64}$/.test(c)) return c;
   }
   return null;
+}
+
+/**
+ * 코드가 아닌 서버 안내 문구(예: "mask size must match source")를 꺼낸다.
+ * FastAPI 검증 오류 배열은 오류 종류와 필드 위치만 쓴다 — 요청 값을 되돌려 주는
+ * input 은 절대 쓰지 않는다. 프롬프트·키가 들어 있는지는 호출자(call)가 다시 거른다.
+ */
+function pickDetail(d: unknown): string | null {
+  const o = (d ?? {}) as Obj;
+  const texts: unknown[] = [
+    o.detail,
+    o.message,
+    o.error,
+    field(o.detail, "message"),
+    field(o.detail, "error"),
+    field(o.detail, "msg"),
+    field(o.error, "message"),
+  ];
+  if (Array.isArray(o.detail)) {
+    for (const item of o.detail.slice(0, 3)) {
+      const loc = field(item, "loc");
+      const where = Array.isArray(loc)
+        ? loc.filter((x) => typeof x === "string" || typeof x === "number").join(".")
+        : "";
+      const type = field(item, "type");
+      texts.push([typeof type === "string" ? type : "", where].filter(Boolean).join(" @ "));
+    }
+  }
+  for (const t of texts) {
+    if (typeof t !== "string") continue;
+    const clean = t.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+    if (clean) return clean.slice(0, 160);
+  }
+  return null;
+}
+
+// 서버 안내에 요청 값이 되돌아와 섞였으면 보여 주지 않는다. 잘리거나 일부만 온
+// 경우도 막도록, 값의 어느 6글자 조각이라도 안내에 들어 있으면 버린다 (안전한 쪽으로
+// 오판해 안내를 숨기는 것은 괜찮다). 이스케이프된 문자열은 내용을 확인할 수 없어 버린다.
+const LEAK_WINDOW = 6;
+
+function leaks(detail: string, secrets: string[]): boolean {
+  if (/\\u[0-9a-f]{4}/i.test(detail)) return true;
+  return secrets.some((s) => {
+    const t = s.replace(/\s+/g, " ").trim();
+    if (t.length < 4) return false;
+    if (t.length <= LEAK_WINDOW) return detail.includes(t);
+    for (let i = 0; i + LEAK_WINDOW <= t.length; i++) {
+      const piece = t.slice(i, i + LEAK_WINDOW);
+      if (piece.replace(/[\s\p{P}]/gu, "").length < 3) continue; // 공백·문장부호 위주 조각은 건너뜀
+      if (detail.includes(piece)) return true;
+    }
+    return false;
+  });
 }
 
 // 입력 검증 오류 중 사용자가 고칠 방법이 분명한 것은 전용 안내를 쓴다.
@@ -73,11 +135,18 @@ const INPUT_ERRORS: Record<string, string> = {
   unsupported_mask: "마스크를 PNG 로 만들지 못했습니다. 부분 편집을 껐다 켠 뒤 다시 칠해 주세요.",
 };
 
-function describe(status: number, code: string | null, what: "job" | "result"): string {
+function describe(
+  status: number,
+  code: string | null,
+  what: "job" | "result",
+  detail: string | null,
+): string {
   const tag = code ? ` (${code})` : "";
+  // 코드로 설명되지 않는 서버 안내는 그대로 덧붙여, 무엇이 문제인지 알 수 있게 한다.
+  const extra = detail && detail !== code ? ` 서버 안내: ${detail}` : "";
   switch (status) {
     case 400:
-      return (code && INPUT_ERRORS[code]) || `입력값을 다시 확인해 주세요${tag}.`;
+      return (code && INPUT_ERRORS[code]) || `입력값을 다시 확인해 주세요${tag}.${extra}`;
     case 401:
       return "관리자 키가 올바르지 않습니다. 키를 다시 입력해 주세요.";
     case 404:
@@ -91,7 +160,7 @@ function describe(status: number, code: string | null, what: "job" | "result"): 
     case 503:
       return "Spark/ComfyUI 가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요.";
     default:
-      return `요청이 실패했습니다 (HTTP ${status}${tag}).`;
+      return `요청이 실패했습니다 (HTTP ${status}${tag}).${extra}`;
   }
 }
 
@@ -115,11 +184,16 @@ export function resolveMediaUrl(path: string): string {
   return MEDIA_API_BASE + p;
 }
 
+/**
+ * @param secrets 오류 안내에 섞여 나오면 안 되는 값(관리자 키는 항상 포함, 생성
+ *                요청이면 프롬프트·대사도). 서버 안내에 이 값이 보이면 안내를 버린다.
+ */
 async function call(
   url: string,
   key: string,
   what: "job" | "result",
   init: RequestInit = {},
+  secrets: string[] = [],
 ): Promise<Response> {
   let res: Response;
   try {
@@ -140,12 +214,16 @@ async function call(
   }
   if (!res.ok) {
     let code: string | null = null;
+    let detail: string | null = null;
     try {
-      code = pickCode(await res.json());
+      const body = await res.json();
+      code = pickCode(body);
+      detail = pickDetail(body);
     } catch {
       /* 본문이 JSON 이 아님 */
     }
-    throw new MediaApiError(res.status, code, describe(res.status, code, what));
+    if (detail && leaks(detail, [key, ...secrets])) detail = null;
+    throw new MediaApiError(res.status, code, describe(res.status, code, what, detail));
   }
   return res;
 }
@@ -175,7 +253,11 @@ function toJobInfo(d: unknown): JobInfo {
 
 export async function createJob(kind: JobKind, key: string, form: FormData): Promise<JobInfo> {
   const path = kind === "image" ? "/v1/image-jobs" : "/v1/video-jobs";
-  const res = await call(MEDIA_API_BASE + path, key, "job", { method: "POST", body: form });
+  // 서버 오류 안내에 프롬프트·대사가 되돌아오면 화면에 싣지 않는다.
+  const secrets = ["prompt", "dialogue"]
+    .map((k) => form.get(k))
+    .filter((v): v is string => typeof v === "string");
+  const res = await call(MEDIA_API_BASE + path, key, "job", { method: "POST", body: form }, secrets);
   return toJobInfo(await res.json());
 }
 

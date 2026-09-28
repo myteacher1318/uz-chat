@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { bakeOrientation } from "@/lib/imageOrientation";
 import { MEDIA_IMAGE_TYPES, MEDIA_MAX_FILE_BYTES, extensionFor } from "@/lib/mediaApi";
 import { useMedia, type ResultItem } from "../MediaProvider";
 import MaskEditor, { type MaskEditorHandle } from "./MaskEditor";
@@ -167,20 +168,24 @@ export default function ImageStudio() {
     form.append("quality", quality);
     form.append("n", String(count));
     if (editing) {
-      form.append("source", source.items[0].file);
-      form.append("edit_strength", String(strength / 100));
+      // 칠한 곳이 없으면 null — 그때는 mask 없이 이미지 전체를 편집한다.
+      let mask: Blob | null = null;
+      let sourceFile = source.items[0].file;
       if (maskOn) {
-        // 칠한 곳이 없으면 null — 그때는 mask 없이 이미지 전체를 편집한다.
-        let mask: Blob | null = null;
         try {
           mask = (await maskRef.current?.exportMask()) ?? null;
+          // 마스크는 화면에 보이는(회전 적용된) 크기로 만들어진다. 원본도 같은 크기가
+          // 되도록 휴대폰 사진의 회전 정보를 픽셀에 반영해 보낸다.
+          if (mask) sourceFile = await bakeOrientation(sourceFile);
         } catch {
           setSubmitting(false);
           setFormError("마스크를 만들지 못했습니다. 원본 크기를 줄이거나 부분 편집을 꺼 주세요.");
           return;
         }
-        if (mask) form.append("mask", mask, "mask.png");
       }
+      form.append("source", sourceFile);
+      form.append("edit_strength", String(strength / 100));
+      if (mask) form.append("mask", mask, "mask.png");
     }
     const r = await start("image", form);
     setSubmitting(false);

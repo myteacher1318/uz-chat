@@ -202,28 +202,25 @@ export default function MaskEditor({
         if (!nat || !strokes.some((s) => !s.erase)) return null;
         if (nat.w * nat.h > MAX_MASK_PIXELS) throw new Error("mask_too_large");
 
-        // 칠했다가 모두 지운 경우도 '칠한 곳 없음'이다. 작은 캔버스로 먼저 확인한다.
-        const k = Math.min(1, 256 / Math.max(nat.w, nat.h));
-        const probe = document.createElement("canvas");
-        probe.width = Math.max(1, Math.round(nat.w * k));
-        probe.height = Math.max(1, Math.round(nat.h * k));
-        const pctx = paintMask(probe, strokes, k);
-        const px = pctx.getImageData(0, 0, probe.width, probe.height).data;
-        probe.width = probe.height = 0;
-        let any = false;
-        for (let i = 0; i < px.length; i += 4) {
-          if (px[i] > 32) {
-            any = true;
-            break;
-          }
-        }
-        if (!any) return null;
-
         const canvas = document.createElement("canvas");
         canvas.width = nat.w;
         canvas.height = nat.h;
-        paintMask(canvas, strokes, 1);
         try {
+          const ctx = paintMask(canvas, strokes, 1);
+          // 붓 가장자리의 안티앨리어싱 회색을 없애 순수 검정(0)·흰색(255)만 남긴다.
+          // 서버 명세가 '배경은 순수 검정, 칠한 곳은 흰색'이다. 이 과정에서 칠했다가
+          // 모두 지워 흰 픽셀이 하나도 없으면 '칠한 곳 없음'으로 본다.
+          const img = ctx.getImageData(0, 0, nat.w, nat.h);
+          const px = img.data;
+          let any = false;
+          for (let i = 0; i < px.length; i += 4) {
+            const v = px[i] >= 128 ? 255 : 0;
+            if (v) any = true;
+            px[i] = px[i + 1] = px[i + 2] = v;
+            px[i + 3] = 255;
+          }
+          if (!any) return null;
+          ctx.putImageData(img, 0, 0);
           return await new Promise<Blob>((resolve, reject) => {
             canvas.toBlob(
               (b) => (b ? resolve(b) : reject(new Error("mask export failed"))),
