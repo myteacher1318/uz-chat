@@ -105,7 +105,7 @@ export default function VideoStudio() {
             max={VIDEO_MAX_IMAGES}
             picked={images.items}
             inputRef={fileInput}
-            onAdd={(files) => setFormError(images.add(files))}
+            onAdd={(files) => setFormError(images.add(files).problem)}
             onRemove={images.remove}
           />
 

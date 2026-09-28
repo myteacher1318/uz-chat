@@ -66,11 +66,18 @@ function pickCode(d: unknown): string | null {
   return null;
 }
 
+// 입력 검증 오류 중 사용자가 고칠 방법이 분명한 것은 전용 안내를 쓴다.
+const INPUT_ERRORS: Record<string, string> = {
+  invalid_edit_strength: "편집 강도는 5~100% 범위여야 합니다. 값을 확인해 주세요.",
+  mask_requires_source: "부분 편집에는 원본 이미지가 필요합니다.",
+  unsupported_mask: "마스크를 PNG 로 만들지 못했습니다. 부분 편집을 껐다 켠 뒤 다시 칠해 주세요.",
+};
+
 function describe(status: number, code: string | null, what: "job" | "result"): string {
   const tag = code ? ` (${code})` : "";
   switch (status) {
     case 400:
-      return `입력값을 다시 확인해 주세요${tag}.`;
+      return (code && INPUT_ERRORS[code]) || `입력값을 다시 확인해 주세요${tag}.`;
     case 401:
       return "관리자 키가 올바르지 않습니다. 키를 다시 입력해 주세요.";
     case 404:

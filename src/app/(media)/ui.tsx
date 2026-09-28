@@ -8,7 +8,7 @@ import {
   extensionFor,
   type JobKind,
 } from "@/lib/mediaApi";
-import type { JobView } from "./MediaProvider";
+import type { JobView, ResultItem } from "./MediaProvider";
 
 // 이미지·영상 화면 공용 부품. 모바일 우선: 입력 글자 16px(iOS 확대 방지),
 // 터치 대상 높이 40px 이상, 한 칸 레이아웃.
@@ -77,6 +77,47 @@ export function Choice<T extends string | number>({
   );
 }
 
+/** 켜기/끄기 스위치 (role="switch") */
+export function Toggle({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="flex min-h-10 w-full items-center gap-3 text-left"
+    >
+      <span
+        className={[
+          "relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors",
+          checked ? "bg-accent" : "bg-foreground/20",
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform",
+            checked ? "translate-x-[22px]" : "translate-x-0.5",
+          ].join(" ")}
+        />
+      </span>
+      <span className="flex flex-wrap items-baseline gap-x-2">
+        <span className="text-sm font-medium">{label}</span>
+        {hint && <span className="text-xs text-muted">{hint}</span>}
+      </span>
+    </button>
+  );
+}
+
 export type Picked = { key: string; file: File; url: string };
 
 /**
@@ -93,10 +134,11 @@ export function usePickedImages(max: number) {
     setItems(next);
   }, []);
 
-  // 반환값: 거른 파일이 있으면 그 이유 (없으면 null)
+  // 반환값: problem = 거른 파일이 있으면 그 이유(없으면 null), added = 실제로 추가된 항목
   const add = useCallback(
-    (files: FileList | File[]): string | null => {
+    (files: FileList | File[]): { problem: string | null; added: Picked[] } => {
       const next = [...itemsRef.current];
+      const added: Picked[] = [];
       let problem: string | null = null;
       for (const file of Array.from(files)) {
         if (!MEDIA_IMAGE_TYPES.includes(file.type)) {
@@ -111,10 +153,12 @@ export function usePickedImages(max: number) {
           problem = `최대 ${max}장까지 올릴 수 있습니다.`;
           break;
         }
-        next.push({ key: `p${seq.current++}`, file, url: URL.createObjectURL(file) });
+        const item = { key: `p${seq.current++}`, file, url: URL.createObjectURL(file) };
+        next.push(item);
+        added.push(item);
       }
       commit(next);
-      return problem;
+      return { problem, added };
     },
     [commit, max],
   );
@@ -220,6 +264,83 @@ const STATUS_LABEL: Record<JobView["status"], string> = {
   cancelled: "취소됨",
 };
 
+function downloadName(kind: JobKind, r: ResultItem): string {
+  return `uz-${kind}-${r.index + 1}.${extensionFor(r.mime)}`;
+}
+
+/**
+ * 결과 이미지 전체 화면 보기. 바깥·닫기·Esc 로 닫는다. 열려 있는 동안 뒤 페이지
+ * 스크롤을 막고, 같은 Blob 으로 바로 저장할 수 있게 저장 버튼을 둔다.
+ */
+function Lightbox({
+  src,
+  alt,
+  downloadName,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  downloadName: string;
+  onClose: () => void;
+}) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={alt}
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex flex-col bg-black/90 font-sans"
+    >
+      <div className="flex justify-end px-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
+        <button
+          ref={closeRef}
+          type="button"
+          onClick={onClose}
+          aria-label="닫기"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20"
+        >
+          <IconX />
+        </button>
+      </div>
+      <div className="flex min-h-0 flex-1 items-center justify-center p-3">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={alt}
+          onClick={(e) => e.stopPropagation()}
+          className="max-h-full max-w-full object-contain"
+        />
+      </div>
+      <div className="flex justify-center px-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <a
+          href={src}
+          download={downloadName}
+          onClick={(e) => e.stopPropagation()}
+          className="flex min-h-10 items-center gap-1.5 rounded-full bg-white px-5 text-sm font-medium text-black"
+        >
+          <IconDownload />
+          저장
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function formatSize(n: number): string {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`;
   return `${Math.max(1, Math.round(n / 1024))}KB`;
@@ -232,13 +353,18 @@ export function JobPanel({
   clearing,
   clearError,
   onClear,
+  onEditResult,
 }: {
   kind: JobKind;
   job: JobView;
   clearing: boolean;
   clearError: string | null;
   onClear: () => void;
+  // 이미지 결과를 원본으로 삼아 이어서 편집 (이미지 화면만 넘긴다)
+  onEditResult?: (r: ResultItem) => void;
 }) {
+  const [zoomed, setZoomed] = useState<ResultItem | null>(null);
+  const closeZoom = useCallback(() => setZoomed(null), []);
   const busy = job.status === "queued" || job.status === "running" || job.pending;
   const tone =
     job.status === "done"
@@ -276,12 +402,22 @@ export function JobPanel({
           {job.results.map((r) => (
             <li key={r.index} className="flex flex-col gap-2">
               {kind === "image" ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={r.objectUrl}
-                  alt={`생성된 이미지 ${r.index + 1}`}
-                  className="w-full rounded-xl border border-line bg-surface object-contain"
-                />
+                <button
+                  type="button"
+                  onClick={() => setZoomed(r)}
+                  aria-label={`생성된 이미지 ${r.index + 1} 크게 보기`}
+                  className="group relative cursor-zoom-in overflow-hidden rounded-xl border border-line bg-surface"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={r.objectUrl}
+                    alt={`생성된 이미지 ${r.index + 1}`}
+                    className="w-full object-contain"
+                  />
+                  <span className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white">
+                    <IconExpand />
+                  </span>
+                </button>
               ) : (
                 <video
                   src={r.objectUrl}
@@ -291,17 +427,38 @@ export function JobPanel({
                   className="w-full rounded-xl bg-black"
                 />
               )}
-              <a
-                href={r.objectUrl}
-                download={`uz-${kind}-${r.index + 1}.${extensionFor(r.mime)}`}
-                className="flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-line bg-raised px-4 text-sm font-medium transition-colors hover:border-accent/40 hover:text-accent"
-              >
-                <IconDownload />
-                {noun} {r.index + 1} 저장 ({formatSize(r.size)})
-              </a>
+              <div className={onEditResult ? "grid grid-cols-2 gap-2" : "flex"}>
+                <a
+                  href={r.objectUrl}
+                  download={downloadName(kind, r)}
+                  className="flex min-h-10 flex-1 items-center justify-center gap-1.5 rounded-xl border border-line bg-raised px-3 text-sm font-medium transition-colors hover:border-accent/40 hover:text-accent"
+                >
+                  <IconDownload />
+                  {onEditResult ? "저장" : `${noun} ${r.index + 1} 저장`} ({formatSize(r.size)})
+                </a>
+                {onEditResult && (
+                  <button
+                    type="button"
+                    onClick={() => onEditResult(r)}
+                    disabled={clearing}
+                    className="flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-accent/40 bg-accent-soft px-3 text-sm font-medium text-accent transition-colors hover:border-accent disabled:opacity-50"
+                  >
+                    <IconEdit />이 이미지로 편집
+                  </button>
+                )}
+              </div>
             </li>
           ))}
         </ul>
+      )}
+
+      {zoomed && (
+        <Lightbox
+          src={zoomed.objectUrl}
+          alt={`생성된 이미지 ${zoomed.index + 1}`}
+          downloadName={downloadName(kind, zoomed)}
+          onClose={closeZoom}
+        />
       )}
 
       <div className="mt-4 border-t border-line pt-4">
@@ -372,6 +529,22 @@ function IconDownload() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M12 4v11m-5-5 5 5 5-5M5 20h14" />
+    </svg>
+  );
+}
+
+function IconExpand() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+    </svg>
+  );
+}
+
+function IconEdit() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
     </svg>
   );
 }

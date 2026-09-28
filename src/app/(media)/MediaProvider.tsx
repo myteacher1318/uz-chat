@@ -64,7 +64,15 @@ function subscribeSavedKey(onChange: () => void) {
   };
 }
 
-export type ResultItem = { index: number; objectUrl: string; mime: string; size: number };
+// blob 은 '이 이미지로 편집'이 원본 파일로 복사할 때 쓴다. 작업을 지우면 state 에서
+// 빠지면서 함께 놓아진다.
+export type ResultItem = {
+  index: number;
+  objectUrl: string;
+  mime: string;
+  size: number;
+  blob: Blob;
+};
 
 export type JobView = {
   id: string;
@@ -283,7 +291,13 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
           if (jobsRef.current[kind]?.id !== id) continue; // 받는 사이에 지워짐
           const objectUrl = URL.createObjectURL(blob);
           urlsRef.current.add(objectUrl);
-          const item: ResultItem = { index: r.index, objectUrl, mime: blob.type, size: blob.size };
+          const item: ResultItem = {
+            index: r.index,
+            objectUrl,
+            mime: blob.type,
+            size: blob.size,
+            blob,
+          };
           patchJob(kind, id, (j) => ({
             ...j,
             results: [...j.results, item].sort((a, b) => a.index - b.index),
