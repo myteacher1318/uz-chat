@@ -51,6 +51,12 @@ const STRENGTH_MIN = 5;
 const STRENGTH_MAX = 100;
 const STRENGTH_DEFAULT = 65;
 
+// 부분 편집 프롬프트 예시 — 대상 영역과 동작을 함께 적는 형태 (Spark 명세의 안내)
+const MASK_PROMPT_EXAMPLES = [
+  "칠한 영역을 밝은 빨간색으로 바꿔라",
+  "칠한 영역의 사람을 지우고 주변 배경으로 자연스럽게 채워라",
+];
+
 // 방금 보낸 편집 요청의 요약 — 결과 칸에 '보낸 편집 정보'로 보여 준다. 실제로 전송된
 // 마스크를 눈으로 확인할 수 있게 해서, 결과가 이상할 때 웹과 서버 중 어디 문제인지
 // 가릴 수 있다. 메모리에만 두고 작업을 지우면 함께 사라진다.
@@ -217,6 +223,7 @@ export default function ImageStudio() {
   const [clearError, setClearError] = useState<string | null>(null);
 
   const editing = source.items.length > 0;
+  const partialEdit = editing && maskOn;
   const canSubmit = !!adminKey && prompt.trim().length > 0 && !job;
   const stylePhrase = STYLES.find((s) => s.value === style)?.phrase ?? "";
 
@@ -491,16 +498,44 @@ export default function ImageStudio() {
           )}
 
           <div>
-            <FieldLabel>프롬프트</FieldLabel>
+            <FieldLabel hint={partialEdit ? "대상(칠한 영역)과 할 일을 함께 적어 주세요" : undefined}>
+              프롬프트
+            </FieldLabel>
             <textarea
               ref={promptRef}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={4}
               autoComplete="off"
-              placeholder={editing ? "어떻게 바꿀지 적어 주세요" : "만들 이미지를 설명해 주세요"}
+              placeholder={
+                partialEdit
+                  ? "예: 칠한 영역을 밝은 빨간색으로 바꿔라"
+                  : editing
+                    ? "어떻게 바꿀지 적어 주세요"
+                    : "만들 이미지를 설명해 주세요"
+              }
               className={`${inputClass} resize-y`}
             />
+            {partialEdit && (
+              // Spark 명세: 작은 영역은 '빨간색'처럼 색·명사만 쓰면 잘 바뀌지 않으므로
+              // 대상 영역과 동작을 명확히 적도록 안내한다. 예시를 누르면 그대로 채워진다.
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                <span>예시:</span>
+                {MASK_PROMPT_EXAMPLES.map((ex) => (
+                  <button
+                    key={ex}
+                    type="button"
+                    onClick={() => {
+                      setPrompt(ex);
+                      promptRef.current?.focus();
+                    }}
+                    className="min-h-8 rounded-full border border-line bg-raised px-2.5 text-left text-foreground/80 transition-colors hover:border-accent/40 hover:text-accent"
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <Choice
