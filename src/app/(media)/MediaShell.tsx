@@ -25,35 +25,48 @@ export default function MediaShell({ children }: { children: React.ReactNode }) 
   );
 }
 
-// 관리자 키 — 비밀번호 칸이고 React 메모리에만 둔다. 새로고침하거나 채팅으로 나가면
-// 사라진다. <form> 밖에 두고 자동완성을 꺼서 브라우저가 저장을 제안하지 않게 한다.
+// 관리자 키 — 비밀번호 칸. Spark 가 받아들인 키는 이 브라우저(localStorage)에 저장돼
+// 다음 방문 때 자동으로 채워진다(MediaProvider 참고). <form> 밖에 두고 자동완성을 꺼서
+// 브라우저 비밀번호 관리자가 따로 저장을 제안하지 않게 한다.
 function AdminKeyField() {
-  const { adminKey, setAdminKey, keyRejected } = useMedia();
+  const { adminKey, setAdminKey, keySaved, forgetKey, keyRejected } = useMedia();
+  const help = keyRejected
+    ? "키가 거부되어 저장된 키를 지웠습니다. 올바른 키를 다시 입력하면 멈춘 작업을 이어서 확인합니다."
+    : keySaved
+      ? "이 브라우저에 저장된 키입니다. 공용 기기라면 사용 후 삭제해 주세요."
+      : "Spark 가 키를 받아들이면 이 브라우저에 저장되어 다음에 자동으로 채워집니다.";
   return (
     <Card>
       <label htmlFor="media-admin-key" className="mb-2 block text-sm font-medium">
         관리자 키
       </label>
-      <input
-        id="media-admin-key"
-        type="password"
-        value={adminKey}
-        onChange={(e) => setAdminKey(e.target.value)}
-        autoComplete="off"
-        autoCapitalize="off"
-        autoCorrect="off"
-        spellCheck={false}
-        data-1p-ignore
-        data-lpignore="true"
-        placeholder="Spark 관리자 키"
-        aria-invalid={keyRejected}
-        className={`${inputClass} ${keyRejected ? "border-red-500/60" : ""}`}
-      />
-      <p className={`mt-2 text-xs ${keyRejected ? "text-red-500" : "text-muted"}`}>
-        {keyRejected
-          ? "키가 거부되었습니다. 올바른 키를 다시 입력하면 멈춘 작업을 이어서 확인합니다."
-          : "이 탭의 메모리에만 있고, 새로고침하거나 채팅으로 돌아가면 지워집니다."}
-      </p>
+      <div className="flex gap-2">
+        <input
+          id="media-admin-key"
+          type="password"
+          value={adminKey}
+          onChange={(e) => setAdminKey(e.target.value)}
+          autoComplete="off"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          data-1p-ignore
+          data-lpignore="true"
+          placeholder="Spark 관리자 키"
+          aria-invalid={keyRejected}
+          className={`${inputClass} min-w-0 flex-1 ${keyRejected ? "border-red-500/60" : ""}`}
+        />
+        {keySaved && (
+          <button
+            type="button"
+            onClick={forgetKey}
+            className="shrink-0 rounded-xl border border-red-500/40 px-3 text-sm font-medium text-red-500 transition-colors hover:bg-red-500/[.06]"
+          >
+            저장된 키 삭제
+          </button>
+        )}
+      </div>
+      <p className={`mt-2 text-xs ${keyRejected ? "text-red-500" : "text-muted"}`}>{help}</p>
     </Card>
   );
 }
