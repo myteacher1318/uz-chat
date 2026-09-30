@@ -101,8 +101,17 @@ function toAnthropicMessage(m: NeutralMessage): Anthropic.Beta.BetaMessageParam 
   return { role: "user", content: blocks.length ? blocks : m.text };
 }
 
-// 한 응답에서 서버 도구를 쓸 수 있는 최대 횟수 — 비용 방어.
-const WEB_MAX_USES = 3;
+// 한 응답에서 서버 도구를 쓸 수 있는 최대 횟수 — 비용 방어. 하루 한도가 아니라
+// 답변마다 새로 센다.
+// 검색: 최신 도구(_20260209)는 모델이 코드 안에서 여러 검색을 한꺼번에 돌리므로
+// 여러 주제를 묻는 질문 하나에 보통 4회를 쓴다(2026-09-30 실측). 3회로 두면 첫
+// 답변부터 '검색 도구 사용 한도 초과'가 났다. 6회 = 보통 필요량 + 여유 2회.
+// 검색 1회 약 1센트이고, 비용은 결과가 들어오는 입력 토큰(답변당 약 6만~11만)이
+// 대부분이다.
+const WEB_SEARCH_MAX_USES = 6;
+// 페이지 읽기: 한 번에 페이지를 통째로(최대 WEB_FETCH_MAX_TOKENS) 가져와 비싸다.
+// 실측에서 거의 쓰이지 않아 3회로 둔다.
+const WEB_FETCH_MAX_USES = 3;
 // web_fetch 가 한 페이지에서 읽어올 최대 토큰. 긴 문서가 통째로 들어와
 // 입력 비용이 튀는 것을 막는다 (일반 기사 한 편은 보통 5~15k 수준).
 const WEB_FETCH_MAX_TOKENS = 30000;
@@ -118,13 +127,13 @@ function webToolsFor(tier: "latest" | "basic" | undefined) {
       {
         type: "web_search_20260209" as const,
         name: "web_search" as const,
-        max_uses: WEB_MAX_USES,
+        max_uses: WEB_SEARCH_MAX_USES,
       },
       {
         // 대화에 이미 등장한 URL만 가져온다 — 모델이 임의의 주소를 부를 수 없다.
         type: "web_fetch_20260209" as const,
         name: "web_fetch" as const,
-        max_uses: WEB_MAX_USES,
+        max_uses: WEB_FETCH_MAX_USES,
         max_content_tokens: WEB_FETCH_MAX_TOKENS,
       },
     ];
@@ -134,7 +143,7 @@ function webToolsFor(tier: "latest" | "basic" | undefined) {
       {
         type: "web_search_20250305" as const,
         name: "web_search" as const,
-        max_uses: WEB_MAX_USES,
+        max_uses: WEB_SEARCH_MAX_USES,
       },
     ];
   }
