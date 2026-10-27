@@ -819,7 +819,7 @@ export default function ChatClient() {
 
   const currentModel = MODELS.find((m) => m.id === model);
   const isAnthropic = currentModel?.provider === "anthropic";
-  // 사고 깊이는 adaptive thinking 지원 모델(Sonnet 5·Opus 4.8)에서만 의미가 있다.
+  // 사고 깊이는 adaptive thinking 지원 모델(Claude 계열)에서만 의미가 있다.
   const supportsDepth = currentModel?.adaptiveThinking === true;
 
   // 마지막 user 메시지 위치 — 수정 버튼은 여기에만 표시

@@ -343,8 +343,8 @@ export async function POST(req: Request): Promise<Response> {
   // 웹 검색은 양쪽 다 지원 — Claude는 web_search 서버 도구,
   // GPT는 Responses API의 web_search 도구를 쓴다.
   const webSearch = webSearchRequested;
-  // 사고 깊이: adaptive thinking 지원 모델(Sonnet 5·Opus 4.8 등)에서만
-  // thinking/effort를 보낸다. Haiku·GPT는 미지원이라 undefined로 두어
+  // 사고 깊이: adaptive thinking 지원 모델(현재 목록의 Claude 모델 전부)에서만
+  // thinking/effort를 보낸다. GPT는 미지원이라 undefined로 두어
   // 파라미터 자체를 생략한다(보내면 400).
   const depthCfg = modelDef.adaptiveThinking === true ? depthParams(depth) : null;
   // 도구가 실제로 있을 때만 지침을 추가 (없는 도구를 언급하면 환각 유발).

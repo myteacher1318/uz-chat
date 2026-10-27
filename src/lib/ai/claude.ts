@@ -24,8 +24,8 @@ export interface StreamOptions {
   maxTokens: number;
   // 사고(thinking) 사용 여부 — adaptive thinking 지원 모델에서만 지정할 것.
   //   true  → thinking: adaptive (모델이 필요할 때 스스로 사고)
-  //   false → thinking: disabled (사고 끔 — 가장 빠름. Opus 5.5·Fable 5.1 은 400)
-  //   undefined → 파라미터 미전송 (Haiku 등 미지원 모델용)
+  //   false → thinking: disabled (사고 끔. Opus 5.5·Fable 5.1·Sonnet 5.5 는 400)
+  //   undefined → 파라미터 미전송 (미지원 모델용)
   thinking?: boolean;
   // 사고 깊이 → output_config.effort. thinking과 마찬가지로 지원 모델에서만.
   effort?: "low" | "medium" | "high";
@@ -334,7 +334,9 @@ export async function* streamClaude({
 }
 
 // 제목 생성 전용 모델 — 가장 저렴하고 빠른 Haiku.
-const TITLE_MODEL = "claude-haiku-4-5-20251001";
+// Haiku 5.5 는 사고가 기본으로 켜져 있고 사고 토큰도 max_tokens 에 포함된다.
+// effort 를 low 로 낮추고 max_tokens 를 넉넉히 줘야 제목이 잘리지 않는다.
+const TITLE_MODEL = "claude-haiku-5-5";
 
 /** 첫 문답 내용으로 대화 제목(짧은 한국어)을 생성한다. 실패 시 null. */
 export async function generateTitle(
@@ -345,7 +347,8 @@ export async function generateTitle(
     const anthropic = getClient();
     const res = await anthropic.messages.create({
       model: TITLE_MODEL,
-      max_tokens: 64,
+      max_tokens: 1024,
+      output_config: { effort: "low" },
       system:
         "대화 목록에 표시할 제목을 만든다. 사용자 질문의 주제를 담아 한국어 15자 이내로. 따옴표·마침표·이모지 없이 제목 텍스트만 출력한다.",
       messages: [
