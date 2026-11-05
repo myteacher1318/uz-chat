@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import HeaderBrand from "../HeaderBrand";
 import SectionNav from "../SectionNav";
@@ -29,8 +30,24 @@ export default function MediaShell({ children }: { children: React.ReactNode }) 
 // 자동으로 채워진다(MediaProvider 참고). 저장된 뒤에는 입력칸을 접어 한 줄로만 보이고,
 // 삭제하거나 401 로 거부되면 다시 펼친다. 입력하는 도중에는 접지 않는다.
 // <form> 밖에 두고 자동완성을 꺼서 브라우저 비밀번호 관리자가 저장을 제안하지 않게 한다.
+//
+// 입력 중인 글자는 이 컴포넌트 안에만 두고, Enter 나 포커스 해제 때 확정해 넘긴다.
+// 글자마다 넘기면 한 글자짜리 키로 상태 확인이 나가 401 → 칸 비움이 글자마다 반복된다.
 function AdminKeyField() {
   const { adminKey, setAdminKey, keySaved, forgetKey, keyRejected } = useMedia();
+  const [local, setLocal] = useState(adminKey);
+  const focused = useRef(false);
+
+  // 밖에서 바뀐 키(저장된 키 복원·401 로 비움·키 삭제)를 칸에 반영한다.
+  // 입력 중에는 건드리지 않는다 — 치고 있는 글자를 지우면 안 된다.
+  useEffect(() => {
+    if (!focused.current) setLocal(adminKey);
+  }, [adminKey]);
+
+  const commit = () => {
+    const v = local.trim();
+    if (v !== adminKey) setAdminKey(v);
+  };
 
   if (keySaved && !keyRejected) {
     return (
@@ -59,8 +76,21 @@ function AdminKeyField() {
       <input
         id="media-admin-key"
         type="password"
-        value={adminKey}
-        onChange={(e) => setAdminKey(e.target.value)}
+        value={local}
+        onChange={(e) => setLocal(e.target.value)}
+        onFocus={() => {
+          focused.current = true;
+        }}
+        onBlur={() => {
+          focused.current = false;
+          commit();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          }
+        }}
         autoComplete="off"
         autoCapitalize="off"
         autoCorrect="off"
@@ -73,8 +103,8 @@ function AdminKeyField() {
       />
       <p className={`mt-2 text-xs ${keyRejected ? "text-red-500" : "text-muted"}`}>
         {keyRejected
-          ? "키가 거부되어 저장된 키를 지웠습니다. 올바른 키를 다시 입력하면 멈춘 작업을 이어서 확인합니다."
-          : "Spark 가 키를 받아들이면 이 브라우저에 저장되고, 이 칸은 접힙니다."}
+          ? "키가 거부되어 저장된 키를 지웠습니다. 올바른 키를 입력하고 Enter 를 누르면 멈춘 작업을 이어서 확인합니다."
+          : "입력 후 Enter(또는 다른 곳 클릭)로 확정합니다. Spark 가 키를 받아들이면 이 브라우저에 저장되고, 이 칸은 접힙니다."}
       </p>
     </Card>
   );

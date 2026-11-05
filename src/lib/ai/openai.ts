@@ -1,23 +1,11 @@
 import OpenAI from "openai";
 import { isImageMediaType, isTextMediaType } from "@/lib/attachments";
-import type { NeutralMessage } from "./types";
+import { stripMarkerChars } from "@/lib/streamMarkers";
+import type { NeutralMessage, StreamOptions } from "./types";
 
-export interface StreamOptions {
-  model: string;
-  system: string;
-  messages: NeutralMessage[];
-  maxTokens: number;
-  // Anthropic 전용 옵션 — OpenAI 경로에서는 무시된다 (인터페이스 호환용)
-  thinking?: boolean;
-  effort?: "low" | "medium" | "high";
-  cache?: boolean;
-  fallbackModel?: string;
-  webTools?: "latest" | "basic";
-  // 웹 검색 도구 사용 여부 — Responses API의 web_search 서버 도구.
-  webSearch?: boolean;
-  // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
-  onUsage?: (u: { input: number; output: number }) => void;
-}
+// 한 응답에서 web_search 를 부를 수 있는 최대 횟수 — Claude 쪽(claude.ts 의
+// WEB_SEARCH_MAX_USES)과 같은 값. 없으면 모델이 검색을 수십 번 돌려 비용이 튈 수 있다.
+const WEB_SEARCH_MAX_CALLS = 6;
 
 let client: OpenAI | null = null;
 
@@ -88,20 +76,53 @@ export async function* streamOpenAI({
     // 대화 저장은 Supabase가 담당 — OpenAI 서버에는 응답을 남기지 않는다.
     store: false,
     // 웹 검색 서버 도구 — 선언만 하면 모델이 필요할 때 알아서 검색한다.
-    ...(webSearch ? { tools: [{ type: "web_search" as const }] } : {}),
+    ...(webSearch
+      ? { tools: [{ type: "web_search" as const }], max_tool_calls: WEB_SEARCH_MAX_CALLS }
+      : {}),
   });
 
   let inputTokens = 0;
   let outputTokens = 0;
+  let sawText = false;
+  // 정상 종료가 아닌 끝맺음 — 스트림이 조용히 끝나지 않도록 안내로 바꾼다.
+  let incomplete: "max_output_tokens" | "content_filter" | "unknown" | null = null;
 
   for await (const event of stream) {
     if (event.type === "response.output_text.delta") {
-      yield event.delta;
+      if (event.delta) sawText = true;
+      yield stripMarkerChars(event.delta);
     } else if (event.type === "response.completed") {
       const u = event.response.usage;
       inputTokens = u?.input_tokens ?? inputTokens;
       outputTokens = u?.output_tokens ?? outputTokens;
+    } else if (event.type === "response.incomplete") {
+      const u = event.response.usage;
+      inputTokens = u?.input_tokens ?? inputTokens;
+      outputTokens = u?.output_tokens ?? outputTokens;
+      incomplete = event.response.incomplete_details?.reason ?? "unknown";
+    } else if (event.type === "response.failed") {
+      // 서버가 응답 생성에 실패했다 — 라우트가 오류 안내로 바꾼다.
+      const e = event.response.error;
+      const err = new Error(e?.message ?? "response.failed") as Error & { code?: string };
+      err.code = e?.code ?? "response_failed";
+      throw err;
+    } else if (event.type === "error") {
+      const err = new Error(event.message) as Error & { code?: string | null };
+      err.code = event.code;
+      throw err;
     }
+  }
+
+  if (incomplete === "max_output_tokens") {
+    yield sawText
+      ? "\n\n⚠️ 출력 한도에 도달해 답변이 여기서 잘렸습니다. 이어서 써 달라고 요청하거나 질문을 나눠 보세요."
+      : "⚠️ 출력 한도 안에서 답변을 만들지 못했습니다. 질문을 줄여 다시 시도해 주세요.";
+  } else if (incomplete === "content_filter") {
+    yield "\n\n⚠️ 콘텐츠 정책에 따라 응답이 중단되었습니다. 질문을 다르게 표현해 보세요.";
+  } else if (incomplete) {
+    yield "\n\n⚠️ 응답이 완료되지 못했습니다. 다시 시도해 주세요.";
+  } else if (!sawText) {
+    yield "⚠️ 모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.";
   }
 
   onUsage?.({ input: inputTokens, output: outputTokens });

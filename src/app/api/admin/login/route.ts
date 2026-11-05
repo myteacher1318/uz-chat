@@ -5,8 +5,21 @@ import {
   checkPassword,
   createToken,
 } from "@/lib/adminAuth";
+import { createRateLimiter } from "@/lib/rateLimit";
+import { clientIp } from "@/lib/usage";
+
+// 비밀번호 무차별 대입 방지 — IP당 1분에 10회. (실제 관리자는 한두 번이면 들어온다)
+const limiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
 export async function POST(req: Request): Promise<Response> {
+  const ip = clientIp(req) ?? "unknown";
+  if (limiter.hit(ip)) {
+    return NextResponse.json(
+      { error: "시도가 너무 많습니다. 잠시 후 다시 시도하세요." },
+      { status: 429 },
+    );
+  }
+
   let body: unknown;
   try {
     body = await req.json();

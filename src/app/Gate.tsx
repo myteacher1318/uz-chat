@@ -3,7 +3,8 @@
 import { useState } from "react";
 
 // 대문 화면 — 8자리 접속 코드를 입력해야 채팅에 입장할 수 있다.
-export default function Gate() {
+// misconfigured: 프로덕션인데 ACCESS_CODE 가 비어 있어 아무도 들어갈 수 없는 상태.
+export default function Gate({ misconfigured = false }: { misconfigured?: boolean }) {
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -50,25 +51,36 @@ export default function Gate() {
         </span>
         <div className="text-center">
           <h1 className="text-lg font-semibold tracking-tight">UZ Chat</h1>
-          <p className="mt-1 text-sm text-muted">접속 코드를 입력하세요</p>
+          <p className="mt-1 text-sm text-muted">
+            {misconfigured ? "지금은 입장할 수 없습니다" : "접속 코드를 입력하세요"}
+          </p>
         </div>
-        <input
-          type="password"
-          autoComplete="off"
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          placeholder="접속 코드"
-          autoFocus
-          className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-center text-lg tracking-[0.3em] shadow-[0_1px_2px_rgba(0,0,0,0.04)] outline-none transition-colors focus:border-accent/60"
-        />
-        {err && <p className="text-sm text-red-500">{err}</p>}
-        <button
-          type="submit"
-          disabled={loading || code.trim().length === 0}
-          className="w-full rounded-xl bg-accent px-4 py-3 text-sm font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-colors hover:bg-accent-strong disabled:opacity-40"
-        >
-          {loading ? "확인 중…" : "입장"}
-        </button>
+        {misconfigured ? (
+          <p className="rounded-xl border border-amber-500/30 bg-amber-500/[.08] px-4 py-3 text-center text-sm text-amber-700 dark:text-amber-300">
+            접속 코드(ACCESS_CODE)가 설정되지 않아 채팅이 닫혀 있습니다. 관리자가
+            Render 환경변수에 코드를 설정하면 다시 열립니다.
+          </p>
+        ) : (
+          <>
+            <input
+              type="password"
+              autoComplete="off"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="접속 코드"
+              autoFocus
+              className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-center text-lg tracking-[0.3em] shadow-[0_1px_2px_rgba(0,0,0,0.04)] outline-none transition-colors focus:border-accent/60"
+            />
+            {err && <p className="text-sm text-red-500">{err}</p>}
+            <button
+              type="submit"
+              disabled={loading || code.trim().length === 0}
+              className="w-full rounded-xl bg-accent px-4 py-3 text-sm font-medium text-white shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-colors hover:bg-accent-strong disabled:opacity-40"
+            >
+              {loading ? "확인 중…" : "입장"}
+            </button>
+          </>
+        )}
       </form>
     </div>
   );

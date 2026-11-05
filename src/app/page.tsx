@@ -1,5 +1,10 @@
 import { cookies } from "next/headers";
-import { GATE_COOKIE, isGateEnabled, verifyGateToken } from "@/lib/gateAuth";
+import {
+  GATE_COOKIE,
+  isGateEnabled,
+  isGateMisconfigured,
+  verifyGateToken,
+} from "@/lib/gateAuth";
 import ChatClient from "./ChatClient";
 import Gate from "./Gate";
 
@@ -8,10 +13,11 @@ export const dynamic = "force-dynamic";
 
 export default async function Home() {
   // ACCESS_CODE 가 설정돼 있으면, 유효한 게이트 쿠키가 없을 때 대문 화면을 보여준다.
+  // 프로덕션에서 ACCESS_CODE 가 비어 있으면 닫힌 상태라 설정 오류 안내만 보인다.
   if (isGateEnabled()) {
     const store = await cookies();
     const ok = await verifyGateToken(store.get(GATE_COOKIE)?.value);
-    if (!ok) return <Gate />;
+    if (!ok) return <Gate misconfigured={isGateMisconfigured()} />;
   }
   return <ChatClient />;
 }

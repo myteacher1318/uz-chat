@@ -29,8 +29,13 @@ import {
 //    401 이 나면 지운다. 다음 방문 때 자동으로 채워지고, '저장된 키 삭제'로 지울 수 있다.
 //  - 프롬프트·파일·Blob·결과·작업 목록은 React 메모리에만 둔다. 새로고침하거나 채팅으로
 //    나가면 사라진다.
+//
+// 키는 '확정된 값'만 쓴다 (MediaShell 의 입력칸이 Enter/포커스 해제 때 setAdminKey 로
+// 넘긴다). 글자마다 넘기면 한 글자짜리 키로 상태 확인이 나가 401 → 칸 비움이 반복된다.
 
 const POLL_MS = 2500;
+// 네트워크 오류·서버 장애가 이어질 때 확인 간격을 늘려 간다 (최대 15초).
+const POLL_BACKOFF_MAX_MS = 15_000;
 
 // ── 관리자 키 저장소 ─────────────────────────────────────────
 const KEY_STORAGE = "uz-media-admin-key";
@@ -116,6 +121,11 @@ function isUnauthorized(e: unknown): boolean {
   return e instanceof MediaApiError && e.status === 401;
 }
 
+// 기다리면 풀릴 수 있는 오류 — 네트워크 끊김(0)·서버 일시 장애(5xx)
+function isTransient(e: unknown): boolean {
+  return e instanceof MediaApiError && (e.status === 0 || e.status >= 500);
+}
+
 type PollDeps = {
   keyRef: RefObject<string>;
   jobsRef: RefObject<Jobs>;
@@ -145,6 +155,7 @@ function useJobPolling(
     if (!id || !active) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0; // 연속 일시 오류 횟수 — 확인 간격을 늘리는 데 쓴다
     const isCurrent = () => !stopped && jobsRef.current[kind]?.id === id;
 
     const tick = async () => {
@@ -153,18 +164,21 @@ function useJobPolling(
         const info = await getJob(id, key);
         keyAccepted(key);
         if (!isCurrent()) return;
+        failures = 0;
         const done = info.status === "done";
         patchJob(kind, id, (j) => ({
           ...j,
           status: info.status,
           expected: info.resultCount,
           pending: done,
+          // 확인에 성공했으면 이전의 일시 오류 안내는 지운다 — 정상 결과에 빨간
+          // 경고가 남지 않게. 실패/취소 안내는 상태에서 다시 만든다.
           note:
             info.status === "failed"
               ? `생성에 실패했습니다${info.errorCode ? ` (${info.errorCode})` : ""}.`
               : info.status === "cancelled"
                 ? "작업이 취소되었습니다."
-                : j.note,
+                : null,
         }));
         if (done) {
           const retry = await collect(kind, id, info.results);
@@ -174,16 +188,28 @@ function useJobPolling(
         if (isTerminal(info.status)) return;
       } catch (e) {
         if (!isCurrent()) return;
-        handleError(kind, id, e, key);
-        // 401·404 는 기다려도 풀리지 않는다 (401 은 키를 다시 입력하면 재개)
-        if (e instanceof MediaApiError && (e.status === 401 || e.status === 404)) {
-          if (e.status === 404) {
-            patchJob(kind, id, (j) => ({ ...j, status: "cancelled", pending: false }));
+        if (e instanceof MediaApiError && e.status === 401) {
+          // 이 401 이 '지금 키'에 대한 것이면 키 재입력 상태로 멈춘다. 그 사이 키가
+          // 바뀌었다면(지난 요청의 늦은 401) 새 키로 계속 확인한다 — 여기서 멈추면
+          // 올바른 키가 들어 있어도 확인이 영영 재개되지 않는다.
+          if (key === keyRef.current) {
+            handleError(kind, id, e, key);
+            return;
           }
+        } else if (e instanceof MediaApiError && e.status === 404) {
+          // 서버에 작업이 없다 — 기다려도 풀리지 않는다.
+          handleError(kind, id, e, key);
+          patchJob(kind, id, (j) => ({ ...j, status: "cancelled", pending: false }));
           return;
+        } else {
+          handleError(kind, id, e, key);
+          if (isTransient(e)) failures += 1;
         }
       }
-      if (!stopped) timer = setTimeout(tick, POLL_MS);
+      if (!stopped) {
+        const delay = Math.min(POLL_MS * 2 ** failures, POLL_BACKOFF_MAX_MS);
+        timer = setTimeout(tick, delay);
+      }
     };
 
     timer = setTimeout(tick, 0);
@@ -197,7 +223,7 @@ function useJobPolling(
 export default function MediaProvider({ children }: { children: React.ReactNode }) {
   // 저장된 키 — 서버 렌더와 하이드레이션 때는 null, 그 뒤 localStorage 값으로 바뀐다.
   const savedKey = useSyncExternalStore(subscribeSavedKey, readSavedKey, () => null);
-  // 사용자가 칸에 입력한 값. null 이면 아직 손대지 않은 것이라 저장된 키를 보여 준다.
+  // 사용자가 확정한 값. null 이면 아직 손대지 않은 것이라 저장된 키를 보여 준다.
   const [draft, setDraft] = useState<string | null>(null);
   const adminKey = draft ?? savedKey ?? "";
 
@@ -211,6 +237,8 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
   const fetchedRef = useRef(new Set<string>());
   // 이 화면이 만든 모든 결과 object URL — 지우기·페이지 이탈 시 빠짐없이 해제한다.
   const urlsRef = useRef(new Set<string>());
+  // 화면을 떠난 뒤 도착한 결과는 object URL 을 만들지 않는다 (해제할 기회가 없다).
+  const mountedRef = useRef(true);
 
   // 폴링 effect 보다 먼저 선언해야 복원된 키가 첫 폴링에 쓰인다.
   useEffect(() => {
@@ -245,7 +273,7 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
   }, []);
 
   // 401: 거부된 키가 저장돼 있으면 지우고, 칸을 비워 다시 입력하게 한다.
-  // 그 사이 사용자가 다른 키를 입력했다면(지난 요청의 늦은 401) 건드리지 않는다.
+  // 그 사이 사용자가 다른 키를 확정했다면(지난 요청의 늦은 401) 건드리지 않는다.
   const keyRefused = useCallback((usedKey: string) => {
     if (usedKey !== keyRef.current) return;
     if (readSavedKey() === usedKey) writeSavedKey(null);
@@ -272,7 +300,7 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
   );
 
   // 완료된 작업의 결과를 URL 당 한 번씩 받아 object URL 로 만든다.
-  // 반환값: 키 거부로 못 받은 결과가 있어 나중에 다시 받아야 하면 true.
+  // 반환값: 키 거부·네트워크 오류로 못 받은 결과가 있어 나중에 다시 받아야 하면 true.
   const collect = useCallback(
     async (kind: JobKind, id: string, results: { index: number; url: string }[]) => {
       let retry = false;
@@ -289,6 +317,7 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
         try {
           const blob = await fetchResult(r.url, key);
           if (jobsRef.current[kind]?.id !== id) continue; // 받는 사이에 지워짐
+          if (!mountedRef.current) continue; // 받는 사이에 화면을 떠남
           const objectUrl = URL.createObjectURL(blob);
           urlsRef.current.add(objectUrl);
           const item: ResultItem = {
@@ -305,7 +334,9 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
         } catch (e) {
           handleError(kind, id, e, key);
           // 401 은 서버가 파일을 내주지 않았으므로 키를 고친 뒤 다시 받을 수 있다.
-          if (isUnauthorized(e)) {
+          // 네트워크 오류도 서버가 파일을 아직 가지고 있을 수 있으니 다음 확인 때
+          // 다시 받는다 (이미 지워졌으면 404 안내로 끝난다).
+          if (isUnauthorized(e) || (e instanceof MediaApiError && e.status === 0)) {
             fetchedRef.current.delete(tag);
             retry = true;
           }
@@ -390,8 +421,10 @@ export default function MediaProvider({ children }: { children: React.ReactNode 
   // 화면을 떠날 때(채팅으로 이동·탭 닫기) 만든 URL 을 모두 해제한다.
   // 서버 작업은 지우지 않는다 — 계속 돌 수 있고 15분 정리 규칙이 처리한다.
   useEffect(() => {
+    mountedRef.current = true;
     const urls = urlsRef.current;
     return () => {
+      mountedRef.current = false;
       for (const u of urls) URL.revokeObjectURL(u);
       urls.clear();
     };

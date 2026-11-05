@@ -1,5 +1,5 @@
-# Render Blueprint — Next.js를 일반 Node 서버로 실행
-# (Vercel 서버리스의 ~60초 함수 시간 제한이 없음 → 긴 답변도 안 끊김)
+# Render Blueprint — Next.js를 일반 Node 서버로 실행.
+# 운영 절차(keep-alive 크론, 정기 정리, 환경변수 설명, 장애 대응)는 README.md 에 있다.
 #
 # 사용법: Render 대시보드 → New → Blueprint → 이 GitHub 저장소 연결
 #         → 아래 sync:false 환경변수들을 입력 → Apply → 배포
@@ -11,8 +11,10 @@ services:
     region: singapore # 한국에서 가까운 리전
     buildCommand: npm install && npm run build
     startCommand: npm run start # next start 는 PORT 환경변수를 자동 인식
+    # ⚠️ '/' 는 src/proxy.ts 의 matcher 에서 일부러 제외돼 있다. 여기에 차단이 걸리면
+    #    이 헬스체크와 keep-alive 핑이 해외 IP 로 판정돼 403 을 받는다 (README 참고).
     healthCheckPath: /
-    autoDeploy: true # main 브랜치 push 시 자동 재배포 (Vercel과 동일)
+    autoDeploy: true # main 브랜치 push 시 자동 재배포
     envVars:
       - key: NODE_VERSION
         value: "22"
@@ -25,90 +27,18 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: ADMIN_PASSWORD
+      - key: ADMIN_PASSWORD # /admin 로그인 비밀번호
         sync: false
-      - key: ACCESS_CODE # 대문 접속 코드(8자리 숫자) — 미설정 시 게이트 꺼짐
+      - key: ACCESS_CODE # 대문 접속 코드(8자리 숫자). 프로덕션에서 비우면 채팅이 '닫힘'
+        sync: false
+      - key: COOKIE_SECRET # 게이트·관리자 쿠키 서명 키 — 길고 임의의 문자열 (README 의 생성 명령)
         sync: false
       - key: BLOCK_FOREIGN_IPS # "1" 이면 국내 IP 대역 외 접근 차단 (미설정 시 꺼짐)
         value: "1"
-      - key: BLOB_READ_WRITE_TOKEN # 큰 파일 첨부 쓸 때만 (없으면 비워둬도 됨)
+      - key: BLOB_READ_WRITE_TOKEN # 큰 파일(2MB 초과) 첨부 쓸 때만 (없으면 비워둬도 됨)
         sync: false
-      - key: CRON_SECRET # 정기 정리용 — 값은 직접 정하는 임의 문자열 (아래 "정기 파일 정리" 참고)
+      - key: CRON_SECRET # 정기 정리(/api/cleanup) 인증 — 직접 정하는 임의 문자열
         sync: false
-# ── 콜드 스타트 회피(keep-alive) ─────────────────────────────────────────────
-# 무료 플랜은 15분 유휴 후 잠든다. 외부 cron 으로 계속 깨워 두어 이를 막는다.
-#
-#   서비스   : cron-job.org (무료)
-#   대상 URL : https://<서비스>.onrender.com/   ← 반드시 '/' (API 경로 아님)
-#   요청 방식: HEAD   ← ⚠️ GET 으로 두면 안 된다 (아래)
-#   타임존   : Asia/Seoul
-#   시(hour) : 0 ~ 23 전체   분(minute): 0,10,20,30,40,50
-#
-# ‼️ 가장 중요한 사실: 크론은 "깨어 있는 서비스를 유지"할 수는 있어도
-#    "잠든 서비스를 깨우지"는 못한다. 콜드 스타트가 34초까지 걸리는데(실측
-#    25.7s / 33.9s) cron-job.org 무료 플랜의 요청 타임아웃 상한이 30초이고,
-#    그전에 Render 프록시가 기동을 기다리다 13~27초에 502 를 먼저 반환한다.
-#    → 그래서 시간대를 좁히면 안 된다. 15분 이상 공백이 생기면 그 순간 잠들고,
-#      그다음부터는 크론이 영원히 실패한다. 07~21시로 운영했을 때 매일 아침
-#      전량 실패해 26회 누적으로 작업이 자동 비활성화됐다.
-#
-# 최초 1회 기동은 사람이 해야 한다: 브라우저로 사이트에 접속해 화면이 뜰 때까지
-# (약 35초) 기다리면 된다. 브라우저는 끝까지 기다려 주므로 크론이 못 하는 역할을
-# 대신한다. 그 뒤로는 10분 간격 핑이 0.15초 만에 끝나며 계속 깨어 있다.
-# 서비스가 완전히 내려간 뒤에도 마찬가지로 브라우저 접속 한 번이 필요하다.
-#
-# ⚠️ 반드시 HEAD 로 보낼 것. cron-job.org 무료 플랜은 응답 본문을 1,024바이트로
-#    제한하는데 '/' 는 게이트 화면만 해도 약 8,600바이트라 GET 이면 매번
-#    "Response data too big" 으로 실패한다. HEAD 는 본문이 0바이트라 안전하고,
-#    응답에 Cache-Control: no-store 가 있어 Cloudflare 캐시를 타지 않고 원본까지
-#    도달하므로 서비스를 깨우는 효과는 GET 과 같다.
-#
-# ⚠️ 월 사용량을 가끔 확인할 것. 무료 인스턴스 시간은 워크스페이스당 월 750시간인데
-#    24시간 유지는 31일 달에 744시간이라 여유가 6시간뿐이다. 초과하면 다음 달까지
-#    정지되고, 정지되면 위 이유로 크론이 스스로 되살리지 못한다.
-#    (무료 서비스를 하나 더 만들면 그 즉시 한도를 넘긴다)
-#
-# UptimeRobot 무료 플랜은 쓰지 말 것 — 시간대 제한이 유료 기능이고, 그 기능 자체가
-# '알림 억제'라 체크가 계속되면 시간은 그대로 소모된다.
-#
-# '/' 를 쓰는 이유: proxy matcher에서 제외돼 있어 해외 모니터링 IP도 차단되지 않고,
-# Anthropic·Supabase를 전혀 호출하지 않아 토큰·DB 비용이 0이며, 접속 로그
-# (recordAccess)에도 남지 않아 관리자 통계가 오염되지 않는다.
-#
-# ⚠️ src/proxy.ts 의 matcher에 '/' 를 추가하면 이 핑과 Render 헬스체크가 함께
-#    깨진다 (해외 IP로 판정돼 403). matcher는 API 경로만 잡도록 유지할 것.
-#
-# 이 모든 제약은 무료 플랜 때문이다. Render Starter(월 $7)는 스핀다운 자체가 없어
-# 크론도 시간 관리도 최초 기동도 필요 없어진다. 학생들에게 배포할 시점엔 그쪽이 맞다.
-#
-# ── 정기 파일 정리(/api/cleanup) ─────────────────────────────────────────────
-# ⚠️ vercel.json 에 크론이 정의돼 있지만 그건 Vercel 배포 전용이다. Render는
-#    vercel.json 을 읽지 않으므로, 아래 설정을 하지 않으면 정리가 아예 돌지 않는다.
-#    (JSON 은 주석을 못 달고 Vercel 이 스키마 밖 키를 거부해서 경고를 여기에 남긴다)
-#
-# 무엇을 지우나: 첨부만 하고 전송하지 않은 파일은 Anthropic Files API 에 올라간 채
-# 어떤 메시지도 참조하지 않아 영구히 남는다. 이 작업이 24시간 지난 그런 고아 파일을
-# 지운다. 대화를 삭제할 때 참조 파일은 이미 정리되므로 누락 경로는 이것뿐이다.
-# 덤으로 매일 messages 테이블을 조회하므로 Supabase 무료 플랜의 7일 유휴 정지도 막는다.
-#
-# 1) CRON_SECRET 값 만들기 — 발급받는 게 아니라 직접 정하는 임의의 문자열:
-#      node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
-# 2) Render 대시보드 → 서비스 → Environment → CRON_SECRET 에 그 값을 저장
-#    (저장하면 자동 재배포되어 1~2분 끊긴다)
-# 3) cron-job.org 에 keep-alive 와 별개인 작업을 하나 더 만든다:
-#      URL     : https://<서비스>.onrender.com/api/cleanup   ← api 가 앞, cleanup 이 뒤
-#      스케줄  : 매일 1회, 시각은 아무 때나 (keep-alive 가 24시간이라 제약 없음)
-#      헤더    : Key=Authorization  Value=Bearer <위 값>
-#                ('Bearer' 는 값 쪽에 있어야 한다. 앞뒤 공백·줄바꿈이 붙으면 401)
-#
-# 요청 방식은 GET/HEAD 어느 쪽이든 된다 — 라우트가 GET 핸들러지만 Next 가 HEAD 를
-# 같은 핸들러로 넘겨 정리는 실행되고 본문만 비워진다. 결과 수치를 보려면 GET.
-# (정상 응답은 401 이 24바이트, 완료 JSON 이 66바이트라 1KB 제한과 무관하다)
-#
-# ⚠️ 이 작업이 502 로 실패한다면 응답 크기 문제가 아니라 서비스가 잠들어 있다는
-#    신호다. 위 keep-alive 가 멈춘 것은 아닌지 먼저 확인할 것.
-#
-# 확인: 성공하면 {"totalFiles":n,"referenced":n,"deleted":n,"skipped":n,"errors":n}
-#       {"error":"unauthorized"} 면 값 불일치 또는 재배포 미완료.
-#       404 면 URL 오타 (경로는 /api/cleanup).
-# 이 경로는 proxy matcher에서 제외돼 있어 해외 크론 서비스에서 호출해도 차단되지 않는다.
+      # 선택 항목 (필요할 때만 대시보드에서 추가):
+      #   ALLOW_OPEN_GATE=1   ACCESS_CODE 없이 일부러 열어 두고 싶을 때 (유료 채팅 공개 주의)
+      #   CLIENT_IP_HEADER    접속자 IP 헤더를 강제 지정 (기본: cf-connecting-ip, README 참고)

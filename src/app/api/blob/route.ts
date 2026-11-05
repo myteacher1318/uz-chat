@@ -1,9 +1,10 @@
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { ALLOWED_TYPES, MAX_FILE_BYTES } from "@/lib/attachments";
 
-// 브라우저가 큰 파일을 Vercel Blob에 '직접' 업로드할 수 있도록 토큰을 발급한다.
-// (파일 바이트가 이 서버리스 함수의 4.5MB 본문 한계를 거치지 않게 하는 핵심.)
+// 브라우저가 큰 파일(2MB 초과)을 Vercel Blob에 '직접' 업로드할 수 있도록 토큰을 발급한다.
+// 파일 바이트가 이 서버를 거치지 않으므로 Render 무료 플랜의 메모리·대역폭을 쓰지 않는다.
 // 동작하려면 Vercel Blob 스토어와 BLOB_READ_WRITE_TOKEN 환경변수가 필요하다.
+// 올라간 Blob 은 /api/files 가 Anthropic 으로 옮긴 뒤 지우고, 남은 것은 /api/cleanup 이 지운다.
 export async function POST(request: Request): Promise<Response> {
   let body: HandleUploadBody;
   try {
@@ -26,7 +27,7 @@ export async function POST(request: Request): Promise<Response> {
     });
     return Response.json(result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "업로드 토큰 발급 실패";
-    return Response.json({ error: msg }, { status: 400 });
+    console.error("[api/blob]", err);
+    return Response.json({ error: "업로드 토큰을 발급하지 못했습니다." }, { status: 400 });
   }
 }

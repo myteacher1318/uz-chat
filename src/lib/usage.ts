@@ -4,17 +4,41 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-// x-forwarded-for(프록시가 세팅) 우선, 없으면 x-real-ip.
-// Next 16 에선 request.ip 가 제거됨 → 헤더로 읽는다.
+// 접속자 IP. Next 16 에선 request.ip 가 제거돼 헤더로 읽는다.
+//
+// ⚠️ X-Forwarded-For 의 첫 값을 믿으면 안 된다. Render 는 클라이언트가 보낸
+// X-Forwarded-For 를 지우지 않고 뒤에 덧붙이기만 하므로, 해외에서
+// "X-Forwarded-For: <한국 IP>" 한 줄만 붙이면 해외 차단과 IP 별 횟수 제한이
+// 모두 우회됐다 (2026-11-05 운영 서버에서 실제 확인).
+//
+// Render 는 Cloudflare 뒤에 있어(응답에 Server: cloudflare, CF-RAY) Cloudflare 가
+// 연결 당사자의 IP 로 덮어쓰는 CF-Connecting-IP 가 함께 온다. 클라이언트가 이 헤더를
+// 직접 보내면 Cloudflare 가 요청 자체를 거절한다(403, 실측). 이 값을 우선 쓴다.
+//
+// 우선순위: CLIENT_IP_HEADER(환경변수로 지정한 헤더) > cf-connecting-ip
+//           > true-client-ip > x-forwarded-for 의 '마지막' 값 > x-real-ip
+// X-Forwarded-For 폴백에서 마지막 값을 쓰는 이유: 가장 가까운 신뢰 프록시가
+// 실제 접속 상대를 맨 뒤에 덧붙이므로, 클라이언트가 앞에 무엇을 써 넣어도 영향이 없다.
 export function clientIp(req: Request): string | null {
+  const custom = process.env.CLIENT_IP_HEADER?.trim().toLowerCase();
+  const candidates = [custom, "cf-connecting-ip", "true-client-ip"].filter(
+    (h): h is string => !!h,
+  );
+  for (const name of candidates) {
+    const v = req.headers.get(name)?.trim();
+    if (v) return v;
+  }
   const xff = req.headers.get("x-forwarded-for");
   if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = xff
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) return last;
   }
-  const real = req.headers.get("x-real-ip");
-  if (real) return real.trim();
-  return null;
+  const real = req.headers.get("x-real-ip")?.trim();
+  return real || null;
 }
 
 // 누적 카운터 증가. 0 인 항목은 보내지 않는다.

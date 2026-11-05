@@ -12,6 +12,10 @@ export type Comparison = {
   outside: number | null; // 칠한 영역 밖 (마스크가 없으면 전체)
 };
 
+// 픽셀 비교는 이 크기로 줄여서 한다. 평균 변화량은 축소해도 거의 같은데, 원본
+// 해상도(4096²면 장당 64MB)로 세 장을 동시에 펼치면 휴대폰에서 탭이 죽는다.
+const COMPARE_MAX_SIDE = 1024;
+
 async function shortHash(blob: Blob): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
   return Array.from(new Uint8Array(digest).slice(0, 4))
@@ -19,16 +23,23 @@ async function shortHash(blob: Blob): Promise<string> {
     .join("");
 }
 
-async function pixels(blob: Blob): Promise<ImageData> {
+type Decoded = { width: number; height: number; data: ImageData };
+
+// 원본 크기는 기록하고, 픽셀은 축소본으로 뽑는다.
+async function pixels(blob: Blob, targetW?: number, targetH?: number): Promise<Decoded> {
   const bmp = await createImageBitmap(blob);
+  const { width, height } = bmp;
+  const scale = Math.min(1, COMPARE_MAX_SIDE / Math.max(width, height));
+  const w = targetW ?? Math.max(1, Math.round(width * scale));
+  const h = targetH ?? Math.max(1, Math.round(height * scale));
   const canvas = document.createElement("canvas");
-  canvas.width = bmp.width;
-  canvas.height = bmp.height;
+  canvas.width = w;
+  canvas.height = h;
   try {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d context");
-    ctx.drawImage(bmp, 0, 0);
-    return ctx.getImageData(0, 0, bmp.width, bmp.height);
+    ctx.drawImage(bmp, 0, 0, w, h);
+    return { width, height, data: ctx.getImageData(0, 0, w, h) };
   } finally {
     bmp.close();
     canvas.width = canvas.height = 0;
@@ -42,14 +53,16 @@ export async function compareResult(
 ): Promise<Comparison> {
   const [sourceHash, resultHash] = await Promise.all([shortHash(source), shortHash(result)]);
   const base = { sameFile: sourceHash === resultHash, sourceHash, resultHash };
-  const [a, b] = await Promise.all([pixels(source), pixels(result)]);
+  // 메모리를 아끼려고 한 장씩 차례로 디코드한다 (결과·마스크는 원본의 축소 크기에 맞춘다).
+  const a = await pixels(source);
+  const b = await pixels(result, a.data.width, a.data.height);
   if (a.width !== b.width || a.height !== b.height) {
     return { ...base, sizeMismatch: `${b.width}×${b.height}`, inside: null, outside: null };
   }
-  const m = mask ? await pixels(mask) : null;
+  const m = mask ? await pixels(mask, a.data.width, a.data.height) : null;
   const useMask = !!m && m.width === a.width && m.height === a.height;
   let inSum = 0, inN = 0, outSum = 0, outN = 0;
-  const pa = a.data, pb = b.data, pm = m?.data;
+  const pa = a.data.data, pb = b.data.data, pm = m?.data.data;
   for (let i = 0; i < pa.length; i += 4) {
     const d =
       (Math.abs(pa[i] - pb[i]) + Math.abs(pa[i + 1] - pb[i + 1]) + Math.abs(pa[i + 2] - pb[i + 2])) / 3;

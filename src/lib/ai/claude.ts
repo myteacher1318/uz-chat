@@ -5,8 +5,8 @@ import {
   isImageMediaType,
   isTextMediaType,
 } from "@/lib/attachments";
-import { THINK_CLOSE, THINK_OPEN } from "@/lib/streamMarkers";
-import type { NeutralMessage } from "./types";
+import { THINK_CLOSE, THINK_OPEN, stripMarkerChars } from "@/lib/streamMarkers";
+import type { NeutralMessage, StreamOptions, WebToolsTier } from "./types";
 
 // Files API는 베타라 messages 호출에도 동일 베타 헤더가 필요하다.
 const FILES_BETA = "files-api-2025-04-14";
@@ -16,34 +16,6 @@ const FALLBACK_BETA = "server-side-fallback-2026-06-01";
 // 서버 도구(web_search) 루프가 한도에 걸려 pause_turn 으로 멈췄을 때 이어받는 최대 횟수.
 // 총 요청 수는 최대 MAX_CONTINUATIONS + 1 회.
 const MAX_CONTINUATIONS = 3;
-
-export interface StreamOptions {
-  model: string;
-  system: string;
-  messages: NeutralMessage[];
-  maxTokens: number;
-  // 사고(thinking) 사용 여부 — adaptive thinking 지원 모델에서만 지정할 것.
-  //   true  → thinking: adaptive (모델이 필요할 때 스스로 사고)
-  //   false → thinking: disabled (사고 끔. Opus 5.5·Fable 5.1·Sonnet 5.5 는 400)
-  //   undefined → 파라미터 미전송 (미지원 모델용)
-  thinking?: boolean;
-  // 사고 깊이 → output_config.effort. thinking과 마찬가지로 지원 모델에서만.
-  effort?: "low" | "medium" | "high";
-  // 웹 서버 도구(검색·페이지 읽기) 사용 여부 (Anthropic 전용)
-  webSearch?: boolean;
-  // 웹 서버 도구 세대 — models.ts 의 ModelDef.webTools 를 그대로 넘긴다.
-  // 미지정이면 webSearch 가 true 여도 도구를 붙이지 않는다(해당 모델이 미지원).
-  webTools?: "latest" | "basic";
-  // 안전 분류기가 요청을 거절했을 때 서버가 대신 실행할 모델 (Opus 5.5·Fable 5.1 등).
-  // 미지정이면 폴백 없이 거절이 그대로 반환된다.
-  fallbackModel?: string;
-  // 프롬프트 캐싱 사용 여부 (Anthropic 전용). 히스토리가 append-only 인
-  // 동안만 켤 것 — 슬라이딩 윈도우가 시작되면 프리픽스가 바뀌어 캐시가
-  // 매번 빗나가면서 쓰기 비용(1.25x)만 든다.
-  cache?: boolean;
-  // 응답 종료 시 토큰 사용량을 알려준다 (사용량 집계용). best-effort.
-  onUsage?: (u: { input: number; output: number }) => void;
-}
 
 let client: Anthropic | null = null;
 
@@ -121,7 +93,7 @@ const WEB_FETCH_MAX_TOKENS = 30000;
  * _20260209 계열은 Opus 4.6+/Sonnet 4.6+/Fable 5.1 에서만 동작하므로, 이전 세대 모델에는
  * 기본 변형(web_search_20250305)만 준다. web_fetch 는 최신 세대에만 붙인다.
  */
-function webToolsFor(tier: "latest" | "basic" | undefined) {
+function webToolsFor(tier: WebToolsTier | undefined) {
   if (tier === "latest") {
     return [
       {
@@ -237,6 +209,10 @@ export async function* streamClaude({
   let sawText = false;
   let refused = false;
   let stillPaused = false;
+  // 출력 한도(max_tokens)에 걸려 잘렸거나, 입력이 컨텍스트 창을 넘긴 경우 —
+  // 둘 다 정상 200 응답이라 따로 알려주지 않으면 빈/잘린 답이 조용히 남는다.
+  let truncated = false;
+  let contextExceeded = false;
 
   // 서버 도구 루프가 한도에 걸리면 stop_reason: "pause_turn" 으로 멈춘다.
   // 이때는 지금까지의 assistant 응답을 붙여 다시 요청하면 서버가 이어서 진행한다.
@@ -282,13 +258,15 @@ export async function* streamClaude({
           );
         }
       } else if (event.type === "content_block_delta") {
+        // 모델 출력에 구간 마커(사설 사용 영역 문자)가 섞이면 클라이언트의
+        // 사고/본문 구분이 뒤집히므로 걸러 보낸다.
         if (event.delta.type === "text_delta") {
           if (event.delta.text) sawText = true;
-          yield event.delta.text;
+          yield stripMarkerChars(event.delta.text);
         } else if (event.delta.type === "thinking_delta") {
           // 사고 요약 — THINK_OPEN/CLOSE 사이로 흘러가 클라이언트가 분리한다.
           // sawText 는 건드리지 않는다 (사고만 오고 본문이 없으면 '응답 없음'이 맞다).
-          yield event.delta.thinking;
+          yield stripMarkerChars(event.delta.thinking);
         } else if (event.delta.type === "citations_delta") {
           // 웹 검색으로 인용된 출처. 모델이 실제로 근거로 쓴 것만 들어온다
           // (검색 결과 전체가 아니라서 노이즈가 적다).
@@ -312,6 +290,14 @@ export async function* streamClaude({
       refused = true;
       break;
     }
+    if (final.stop_reason === "max_tokens") {
+      truncated = true;
+      break;
+    }
+    if (final.stop_reason === "model_context_window_exceeded") {
+      contextExceeded = true;
+      break;
+    }
     if (final.stop_reason !== "pause_turn") break;
     if (round >= MAX_CONTINUATIONS) {
       stillPaused = true;
@@ -328,6 +314,17 @@ export async function* streamClaude({
     yield "⚠️ 이 요청은 안전 정책에 따라 처리되지 않았습니다. 질문을 다르게 표현해 보세요.";
   } else if (stillPaused) {
     yield "\n\n⚠️ 검색이 길어져 여기서 중단했습니다. 질문을 좁혀서 다시 물어보세요.";
+  } else if (truncated) {
+    // 사고 토큰도 max_tokens 에 포함되므로, 깊게 사고하다 본문을 쓰기 전에 한도가
+    // 끝나면 본문이 아예 없다. 두 경우를 구분해 안내한다.
+    yield sawText
+      ? "\n\n⚠️ 출력 한도에 도달해 답변이 여기서 잘렸습니다. 이어서 써 달라고 요청하거나 질문을 나눠 보세요."
+      : "⚠️ 사고에 출력 한도를 모두 써서 답변을 만들지 못했습니다. 사고 깊이를 낮추거나 질문을 줄여 다시 시도해 주세요.";
+  } else if (contextExceeded) {
+    yield "\n\n⚠️ 대화가 모델의 컨텍스트 한도를 넘었습니다. 새 대화를 시작하거나 첨부를 줄여 주세요.";
+  } else if (!sawText) {
+    // 거절도 한도도 아닌데 본문이 없다 — 드물지만 빈 말풍선으로 끝나지 않게 한다.
+    yield "⚠️ 모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.";
   }
 
   onUsage?.({ input: inputTokens, output: outputTokens });

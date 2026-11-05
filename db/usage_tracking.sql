@@ -101,3 +101,16 @@ begin
                                    access_log.last_user_agent);
 end;
 $$;
+
+-- ----------------------------------------------------------------------------
+-- 테이블 보안(RLS) — 이 앱은 service role 키로만 접근하므로 anon/authenticated 를 막는다.
+-- (전체 테이블·함수에 대한 같은 설정은 db/rls.sql 에 있다. 둘 다 여러 번 실행해도 안전)
+-- ----------------------------------------------------------------------------
+alter table public.usage_counters enable row level security;
+alter table public.usage_events   enable row level security;
+alter table public.access_log     enable row level security;
+revoke all on public.usage_counters, public.usage_events, public.access_log
+  from anon, authenticated;
+revoke execute on function public.bump_usage_counters(jsonb) from anon, authenticated;
+revoke execute on function public.record_usage_event(text, text, integer, integer) from anon, authenticated;
+revoke execute on function public.record_access(text, text) from anon, authenticated;

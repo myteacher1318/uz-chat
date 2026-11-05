@@ -1,11 +1,22 @@
 import { getSupabase } from "@/lib/supabaseServer";
 import { listAnthropicFiles } from "@/lib/ai/claude";
+import {
+  TRUST_AFTER_HITS,
+  TRUST_GRANDFATHER_BEFORE,
+  autoTrusted,
+  type IpPolicy,
+} from "@/lib/ipPolicy";
 
 // 보호됨(proxy). 사용량 집계.
 // 핵심: 대화를 삭제해도 통계가 남도록, 라이브 테이블(conversations/messages)이 아니라
 //       분리된 누적 카운터(usage_counters) / 원장(usage_events) / 접속로그(access_log)를 읽는다.
 
 type CounterMap = Record<string, number>;
+
+// Supabase(PostgREST)는 한 번에 최대 1,000행만 돌려주고 오류를 내지 않는다.
+// 원장은 응답 1건당 1행씩 계속 늘어나므로 페이지를 넘겨 끝까지 읽는다.
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 200; // 20만 행 — 그 이상이면 SQL 집계(RPC)로 바꿀 때다
 
 // usage_counters(key/value) → 맵. 테이블/행이 없으면 0.
 async function readCounters(
@@ -26,6 +37,23 @@ async function readCounters(
   return map;
 }
 
+// 관리자가 등록한 제한 IP 집합. 테이블이 아직 없으면(db/ip_rules.sql 미실행) null.
+async function readRestrictedIps(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<Set<string> | null> {
+  try {
+    const { data, error } = await supabase.from("restricted_ips").select("ip");
+    if (error) throw error;
+    return new Set((data ?? []).map((r) => String(r.ip)));
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code !== "42P01" && code !== "PGRST205") {
+      console.error("[admin/stats] restricted_ips", err);
+    }
+    return null;
+  }
+}
+
 export async function GET(): Promise<Response> {
   try {
     const supabase = getSupabase();
@@ -40,33 +68,41 @@ export async function GET(): Promise<Response> {
       { count: number; inputTokens: number; outputTokens: number }
     >();
     const dayMap = new Map<string, { messages: number; tokens: number }>();
+    let ledgerTruncated = false;
     try {
-      const { data, error } = await supabase
-        .from("usage_events")
-        .select("created_at, model, input_tokens, output_tokens");
-      if (error) throw error;
-      for (const e of data ?? []) {
-        const model =
-          typeof e.model === "string" && e.model ? e.model : "(unknown)";
-        const inTok = Number(e.input_tokens) || 0;
-        const outTok = Number(e.output_tokens) || 0;
-        const m = modelMap.get(model) ?? {
-          count: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-        };
-        m.count += 1;
-        m.inputTokens += inTok;
-        m.outputTokens += outTok;
-        modelMap.set(model, m);
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const from = page * PAGE_SIZE;
+        const { data, error } = await supabase
+          .from("usage_events")
+          .select("created_at, model, input_tokens, output_tokens")
+          .order("id", { ascending: true })
+          .range(from, from + PAGE_SIZE - 1);
+        if (error) throw error;
+        for (const e of data ?? []) {
+          const model =
+            typeof e.model === "string" && e.model ? e.model : "(unknown)";
+          const inTok = Number(e.input_tokens) || 0;
+          const outTok = Number(e.output_tokens) || 0;
+          const m = modelMap.get(model) ?? {
+            count: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+          };
+          m.count += 1;
+          m.inputTokens += inTok;
+          m.outputTokens += outTok;
+          modelMap.set(model, m);
 
-        if (typeof e.created_at === "string") {
-          const day = e.created_at.slice(0, 10); // UTC YYYY-MM-DD
-          const d = dayMap.get(day) ?? { messages: 0, tokens: 0 };
-          d.messages += 1;
-          d.tokens += inTok + outTok;
-          dayMap.set(day, d);
+          if (typeof e.created_at === "string") {
+            const day = e.created_at.slice(0, 10); // UTC YYYY-MM-DD
+            const d = dayMap.get(day) ?? { messages: 0, tokens: 0 };
+            d.messages += 1;
+            d.tokens += inTok + outTok;
+            dayMap.set(day, d);
+          }
         }
+        if (!data || data.length < PAGE_SIZE) break;
+        if (page === MAX_PAGES - 1) ledgerTruncated = true;
       }
     } catch (err) {
       console.error("[admin/stats] usage_events", err);
@@ -97,7 +133,8 @@ export async function GET(): Promise<Response> {
         supabase.from("messages").select("*", { count: "exact", head: true }),
       ]);
 
-    // 4) 접속 IP 누적 기록
+    // 4) 접속 IP 누적 기록 + IP 별 정책(ipPolicy.ts 와 같은 규칙)
+    const restricted = await readRestrictedIps(supabase);
     let access: {
       total: number;
       rows: {
@@ -106,6 +143,7 @@ export async function GET(): Promise<Response> {
         firstSeen: string | null;
         lastSeen: string | null;
         userAgent: string | null;
+        policy: IpPolicy;
       }[];
     } = { total: 0, rows: [] };
     try {
@@ -119,13 +157,24 @@ export async function GET(): Promise<Response> {
       if (error) throw error;
       access = {
         total: count ?? (data?.length ?? 0),
-        rows: (data ?? []).map((r) => ({
-          ip: String(r.ip),
-          hits: Number(r.hits) || 0,
-          firstSeen: (r.first_seen as string) ?? null,
-          lastSeen: (r.last_seen as string) ?? null,
-          userAgent: (r.last_user_agent as string) ?? null,
-        })),
+        rows: (data ?? []).map((r) => {
+          const ip = String(r.ip);
+          const hits = Number(r.hits) || 0;
+          const firstSeen = (r.first_seen as string) ?? null;
+          const policy: IpPolicy = restricted?.has(ip)
+            ? "restricted"
+            : autoTrusted({ first_seen: firstSeen, hits })
+              ? "trusted"
+              : "limited";
+          return {
+            ip,
+            hits,
+            firstSeen,
+            lastSeen: (r.last_seen as string) ?? null,
+            userAgent: (r.last_user_agent as string) ?? null,
+            policy,
+          };
+        }),
       };
     } catch (err) {
       console.error("[admin/stats] access_log", err);
@@ -165,8 +214,14 @@ export async function GET(): Promise<Response> {
         filesApi,
       },
       byModel,
+      ledgerTruncated,
       last7Days,
       access,
+      ipPolicy: {
+        grandfatherBefore: TRUST_GRANDFATHER_BEFORE,
+        trustAfterHits: TRUST_AFTER_HITS,
+        restrictedAvailable: restricted !== null,
+      },
     });
   } catch (err) {
     console.error("[admin/stats:GET]", err);
