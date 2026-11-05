@@ -56,7 +56,12 @@ export function resolveModel(id: string | undefined): ModelDef {
 // Claude 모델(adaptive thinking 지원)에서만 의미가 있다.
 // API로는 두 파라미터로 표현된다:
 //   - thinking: adaptive(켬) / disabled(끔)
-//   - output_config.effort: 사고·응답 토큰 예산 (low|medium|high…)
+//   - output_config.effort: 사고·응답 토큰 예산. API 단계는 5개
+//     (low < medium < high < xhigh < max)인데, 이 앱은 아래 3개만 노출한다.
+//       빠르게 = low · 표준 = medium · 깊게 = high
+//     xhigh/max 는 코딩·장시간 에이전트 작업용이라 채팅에는 넣지 않았다.
+//     (API 기본값은 Sonnet 5.5 가 high, Opus 5.5·Haiku 5.5 가 medium — 이 앱은
+//      모델과 무관하게 아래 DEFAULT_THINKING_DEPTH 를 명시해 보낸다)
 // GPT 계열은 effort/thinking 모두 미지원이라 이 설정을 보내지 않는다.
 export type Effort = "low" | "medium" | "high";
 export type ThinkingDepth = "fast" | "standard" | "deep";
@@ -67,8 +72,8 @@ export const THINKING_DEPTHS: { id: ThinkingDepth; label: string }[] = [
   { id: "deep", label: "깊게" },
 ];
 
-// 기본값: 빠르게 — 낮은 effort로 최소 지연 응답.
-export const DEFAULT_THINKING_DEPTH: ThinkingDepth = "fast";
+// 기본값: 표준(medium) — 관리자 결정 2026-11-05 (이전 기본값은 빠르게/low).
+export const DEFAULT_THINKING_DEPTH: ThinkingDepth = "standard";
 
 export type DepthParams = { thinking: boolean; effort: Effort };
 
