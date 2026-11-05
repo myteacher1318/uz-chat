@@ -47,6 +47,8 @@ type Message = {
   streaming?: boolean;
   // 사고 요약 — 화면 표시 전용이라 DB에 저장하지 않고 새로고침하면 사라진다.
   thinking?: string;
+  // 작성 시각(ISO). 불러온 메시지는 DB의 created_at, 방금 보낸 메시지는 전송 시각.
+  createdAt?: string;
 };
 
 function fileToBase64(file: File): Promise<string> {
@@ -74,6 +76,7 @@ function rowsToMessages(rows: MessageRow[]): Message[] {
     id: crypto.randomUUID(),
     role: r.role,
     content: r.content,
+    createdAt: r.created_at,
     attachments: Array.isArray(r.attachments)
       ? r.attachments.map((a) => ({
           id: crypto.randomUUID(),
@@ -86,6 +89,37 @@ function rowsToMessages(rows: MessageRow[]): Message[] {
         }))
       : undefined,
   }));
+}
+
+// 답변 아래 시각 — "2026년 11월 5일 오후 2:32". 브라우저 시간대로 표시한다.
+const MESSAGE_TIME_FMT = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+// 대화 목록 날짜 — 올해면 "11. 5.", 다른 해면 "2025. 3. 2."
+const LIST_DATE_FMT = new Intl.DateTimeFormat("ko-KR", {
+  month: "numeric",
+  day: "numeric",
+});
+const LIST_DATE_FMT_WITH_YEAR = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+});
+
+function formatMessageTime(iso: string): string | null {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : MESSAGE_TIME_FMT.format(d);
+}
+
+function formatListDate(iso: string): string | null {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return (sameYear ? LIST_DATE_FMT : LIST_DATE_FMT_WITH_YEAR).format(d);
 }
 
 export default function ChatClient() {
@@ -449,7 +483,13 @@ export default function ChatClient() {
     const assistantId = crypto.randomUUID();
     setMessages((prev) => [
       ...prev,
-      { id: assistantId, role: "assistant", content: "", streaming: true },
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        streaming: true,
+        createdAt: new Date().toISOString(),
+      },
     ]);
 
     const controller = new AbortController();
@@ -686,6 +726,7 @@ export default function ChatClient() {
         role: "user",
         content: text,
         attachments: pending.length ? pending : undefined,
+        createdAt: new Date().toISOString(),
       };
       const nextMessages: Message[] = [...messages, userMsg];
 
@@ -887,6 +928,7 @@ export default function ChatClient() {
             <ul className="flex flex-col gap-0.5">
               {conversations.map((c) => {
                 const active = c.id === activeConversationId;
+                const dateLabel = formatListDate(c.updated_at);
                 return (
                   <li
                     key={c.id}
@@ -905,6 +947,16 @@ export default function ChatClient() {
                     >
                       {c.title}
                     </button>
+                    {/* 마지막으로 대화한 날짜 — 언제 나눈 대화인지 목록에서 바로 보인다 */}
+                    {dateLabel && (
+                      <time
+                        dateTime={c.updated_at}
+                        title={formatMessageTime(c.updated_at) ?? undefined}
+                        className="shrink-0 pr-1 text-[11px] tabular-nums text-muted/70"
+                      >
+                        {dateLabel}
+                      </time>
+                    )}
                     {/*
                       모바일에는 hover가 없다. hidden + group-hover:flex 로 두면
                       터치 기기에서 삭제 버튼에 영영 닿을 수 없으므로, 메시지 액션과
@@ -1266,6 +1318,12 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   const showCopy = message.content !== "" && !message.error;
+  // 답변 시각 — 문답 한 쌍에 하나씩, 답변 아래에만 항상 보인다.
+  // (복사·재생성 버튼과 달리 hover 없이도 보여야 언제 나눈 대화인지 알 수 있다)
+  const timeLabel =
+    !isUser && !message.error && !message.streaming && message.createdAt
+      ? formatMessageTime(message.createdAt)
+      : null;
 
   return (
     <div
@@ -1317,39 +1375,51 @@ const MessageBubble = memo(function MessageBubble({
             <Markdown content={message.content} />
           ))}
       </div>
-      {(showCopy || onEdit || onRegenerate) && (
-        <div className="mt-1.5 flex gap-1 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
-          {showCopy && (
-            <button
-              type="button"
-              onClick={copy}
-              aria-label="메시지 복사"
-              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+      {(timeLabel || showCopy || onEdit || onRegenerate) && (
+        <div className="mt-1.5 flex items-center gap-1">
+          {timeLabel && (
+            <time
+              dateTime={message.createdAt}
+              className="px-1.5 text-xs text-muted/70"
             >
-              {copied ? "복사됨 ✓" : "복사"}
-            </button>
+              {timeLabel}
+            </time>
           )}
-          {onEdit && (
-            <button
-              type="button"
-              onClick={onEdit}
-              aria-label="메시지 수정"
-              title="이 메시지를 수정해 다시 보냅니다"
-              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
-            >
-              수정
-            </button>
-          )}
-          {onRegenerate && (
-            <button
-              type="button"
-              onClick={onRegenerate}
-              aria-label="응답 재생성"
-              title="이 응답을 버리고 다시 생성합니다"
-              className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
-            >
-              재생성
-            </button>
+          {(showCopy || onEdit || onRegenerate) && (
+            <div className="flex gap-1 transition-opacity md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100">
+              {showCopy && (
+                <button
+                  type="button"
+                  onClick={copy}
+                  aria-label="메시지 복사"
+                  className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+                >
+                  {copied ? "복사됨 ✓" : "복사"}
+                </button>
+              )}
+              {onEdit && (
+                <button
+                  type="button"
+                  onClick={onEdit}
+                  aria-label="메시지 수정"
+                  title="이 메시지를 수정해 다시 보냅니다"
+                  className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+                >
+                  수정
+                </button>
+              )}
+              {onRegenerate && (
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  aria-label="응답 재생성"
+                  title="이 응답을 버리고 다시 생성합니다"
+                  className="rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-foreground/[.05] hover:text-foreground"
+                >
+                  재생성
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
