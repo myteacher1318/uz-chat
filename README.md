@@ -100,7 +100,8 @@ cron-job.org(무료) 설정:
 ### 접속 IP 와 해외 차단
 
 - 접속자 IP 는 `src/lib/usage.ts` 의 `clientIp()` 가 정한다. Render 는 Cloudflare 뒤에 있어 Cloudflare 가 덮어쓰는 `CF-Connecting-IP` 를 우선 쓴다. `X-Forwarded-For` 의 첫 값은 클라이언트가 마음대로 넣을 수 있어 쓰지 않는다 (실제로 우회됐던 문제).
-- 플랫폼을 옮기면 `CLIENT_IP_HEADER` 로 헤더를 지정하거나, 지정이 없으면 `X-Forwarded-For` 의 마지막 값을 쓴다.
+- 2026-11-05 운영에서 확인한 실제 헤더: `cf-connecting-ip`·`true-client-ip` = 접속자 공인 IP, `x-forwarded-for` = `<접속자>, <Cloudflare 엣지 172.70.x.x>, <Render 내부 10.x.x.x>`, `cf-ipcountry` = `KR`. 즉 X-Forwarded-For 는 첫 값도(위조 가능) 마지막 값도(Render 내부 IP) 쓸 수 없다.
+- `/admin` 의 "내 접속 진단" 에서 서버가 보는 IP 와 위 헤더를 바로 확인할 수 있다. 거기 IP 가 본인 공인 IP 와 다르면 플랫폼 구성이 바뀐 것이니 `CLIENT_IP_HEADER` 로 헤더를 지정한다 (지정이 없고 Cloudflare 헤더도 없으면 `X-Forwarded-For` 의 마지막 값을 쓴다).
 - 해외 차단(`BLOCK_FOREIGN_IPS=1`)은 "확실히 해외" 일 때만 403 이고, 사설 IP·판정 불가는 통과시킨다. 대역표 갱신: `node scripts/gen-kr-ranges.mjs`.
 - 확인 방법: 국내에서 `/api/conversations` 를 호출하면 401 `gate_required`, 해외에서는 403 `region_blocked`.
 
