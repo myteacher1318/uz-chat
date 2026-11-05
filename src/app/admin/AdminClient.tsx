@@ -49,6 +49,20 @@ type Stats = {
 
 type RestrictedRow = { ip: string; note: string | null; created_at: string };
 
+type WhoAmI = {
+  ip: string | null;
+  country: "kr" | "foreign" | "unknown";
+  geoBlockEnabled: boolean;
+  customHeader: string | null;
+  headers: Record<string, string | null>;
+};
+
+const COUNTRY_LABEL: Record<WhoAmI["country"], string> = {
+  kr: "국내",
+  foreign: "해외 (차단 대상)",
+  unknown: "판정 불가 (통과)",
+};
+
 const nf = (n: number) => (n ?? 0).toLocaleString("ko-KR");
 
 function formatBytes(n: number): string {
@@ -113,6 +127,8 @@ export default function AdminClient() {
   const [newNote, setNewNote] = useState("");
   const [ipBusy, setIpBusy] = useState<string | null>(null); // 처리 중인 IP
   const [ipMsg, setIpMsg] = useState<string | null>(null);
+  // 내 접속 진단 — 서버가 이 브라우저를 어떤 IP 로 보는지
+  const [whoami, setWhoami] = useState<WhoAmI | null>(null);
 
   useEffect(() => {
     void load();
@@ -141,11 +157,13 @@ export default function AdminClient() {
     setLoadingStats(true);
     setErr(null);
     try {
-      const [sRes, cRes] = await Promise.all([
+      const [sRes, cRes, wRes] = await Promise.all([
         fetch("/api/admin/stats"),
         fetch("/api/admin/settings"),
+        fetch("/api/admin/whoami"),
         loadRestricted(),
       ]);
+      if (wRes.ok) setWhoami(await wRes.json());
       if (sRes.ok) setStats(await sRes.json());
       else setErr("통계를 불러오지 못했습니다.");
       if (cRes.ok) {
@@ -352,6 +370,33 @@ export default function AdminClient() {
           </button>
         </form>
         {ipMsg && <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">{ipMsg}</p>}
+
+        {whoami && (
+          <div className="mt-4 rounded-lg border border-black/[.06] bg-black/[.02] p-3 text-xs dark:border-white/[.1] dark:bg-white/[.03]">
+            <p className="mb-1 font-medium">
+              내 접속 진단 — 서버가 이 브라우저를{" "}
+              <span className="font-mono">{whoami.ip ?? "(IP 없음)"}</span> 로 봅니다 ·{" "}
+              {COUNTRY_LABEL[whoami.country]} · 해외 차단{" "}
+              {whoami.geoBlockEnabled ? "켜짐" : "꺼짐"}
+              {whoami.customHeader && ` · CLIENT_IP_HEADER=${whoami.customHeader}`}
+            </p>
+            <p className="mb-2 text-zinc-500 dark:text-zinc-400">
+              여기 IP 가 실제 공인 IP 와 다르면(사설 IP·Cloudflare 주소 등) 해외 차단과 IP
+              정책이 어긋난 것입니다. README 의 &quot;접속 IP&quot; 항목을 참고해 CLIENT_IP_HEADER 를
+              조정하세요.
+            </p>
+            <table className="w-full">
+              <tbody>
+                {Object.entries(whoami.headers).map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="py-0.5 pr-3 font-mono text-zinc-500">{k}</td>
+                    <td className="py-0.5 font-mono break-all">{v ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         <div className="mt-3">
           {restricted && restricted.length === 0 && (
