@@ -6,6 +6,10 @@
 --
 -- 실행법: Supabase 대시보드 → SQL Editor → 아래 전체를 붙여넣고 Run.
 --         (여러 번 실행해도 안전 — 모두 IF NOT EXISTS / OR REPLACE)
+--
+-- 변경 이력:
+--   2026-11-06  usage_events.ip 추가 (IP 별 사용량). 그 전에 실행했던 프로젝트도
+--               이 파일을 다시 실행해야 /admin 의 IP 별 사용량이 쌓인다.
 -- ============================================================================
 
 -- 1) 누적 카운터 (단조 증가). 대화가 삭제돼도 절대 줄어들지 않는다.
@@ -18,16 +22,22 @@ create table if not exists public.usage_counters (
 
 -- 2) 토큰/모델 원장 (append-only). 응답 1건당 1행.
 --    conversations 를 참조하지 않으므로 대화가 지워져도 남는다.
+--    ip: 응답을 요청한 접속 IP (2026-11-06 추가 — 그 전 행은 null).
 create table if not exists public.usage_events (
   id            bigint generated always as identity primary key,
   created_at    timestamptz not null default now(),
   provider      text,
   model         text,
   input_tokens  integer not null default 0,
-  output_tokens integer not null default 0
+  output_tokens integer not null default 0,
+  ip            text
 );
+-- 이미 있던 테이블에 ip 열 추가 (처음 만드는 경우는 위에서 이미 포함)
+alter table public.usage_events add column if not exists ip text;
 create index if not exists usage_events_created_at_idx
   on public.usage_events (created_at);
+create index if not exists usage_events_ip_created_at_idx
+  on public.usage_events (ip, created_at);
 
 -- 3) 접속 IP 누적 기록 (IP별 1행, upsert 로 hits 증가).
 create table if not exists public.access_log (
@@ -65,18 +75,28 @@ end;
 $$;
 
 -- 응답 1건 기록: 원장에 1행 insert + 토큰/어시스턴트 카운터 증가 (한 트랜잭션).
+-- p_ip 는 선택(기본 null) — 옛 서버가 4인자로 호출해도 동작한다.
+-- 2026-11-06 이전의 4인자 함수는 같은 이름의 중복(overload)이 남지 않도록 지운다.
+drop function if exists public.record_usage_event(text, text, integer, integer);
 create or replace function public.record_usage_event(
   p_provider text,
   p_model    text,
   p_input    integer,
-  p_output   integer
+  p_output   integer,
+  p_ip       text default null
 )
 returns void
 language plpgsql
 as $$
 begin
-  insert into public.usage_events(provider, model, input_tokens, output_tokens)
-  values (p_provider, p_model, coalesce(p_input, 0), coalesce(p_output, 0));
+  insert into public.usage_events(provider, model, input_tokens, output_tokens, ip)
+  values (
+    p_provider,
+    p_model,
+    coalesce(p_input, 0),
+    coalesce(p_output, 0),
+    nullif(trim(p_ip), '')
+  );
 
   perform public.bump_usage_counters(jsonb_build_object(
     'assistant_messages', 1,
@@ -112,5 +132,5 @@ alter table public.access_log     enable row level security;
 revoke all on public.usage_counters, public.usage_events, public.access_log
   from anon, authenticated;
 revoke execute on function public.bump_usage_counters(jsonb) from anon, authenticated;
-revoke execute on function public.record_usage_event(text, text, integer, integer) from anon, authenticated;
+revoke execute on function public.record_usage_event(text, text, integer, integer, text) from anon, authenticated;
 revoke execute on function public.record_access(text, text) from anon, authenticated;

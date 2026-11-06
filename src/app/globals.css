@@ -18,6 +18,9 @@
   --accent-soft: rgba(189, 93, 58, 0.1);
   --bubble: #2a2925; /* 사용자 말풍선 */
   --bubble-fg: #f7f6f3;
+  /* 관리자 차트 계열색 — 라이트/다크 서피스에서 색각 이상·대비 검증을 통과한 파랑·주황 */
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -33,6 +36,8 @@
     --accent-soft: rgba(217, 119, 87, 0.13);
     --bubble: #343330;
     --bubble-fg: #f2f1ed;
+    --viz-1: #3987e5;
+    --viz-2: #d95926;
   }
 }
 
@@ -48,6 +53,8 @@
   --color-accent-soft: var(--accent-soft);
   --color-bubble: var(--bubble);
   --color-bubble-fg: var(--bubble-fg);
+  --color-viz-1: var(--viz-1);
+  --color-viz-2: var(--viz-2);
   --font-sans: var(--font-geist-sans), "Pretendard Variable", Pretendard,
     "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;

@@ -561,6 +561,7 @@ export async function POST(req: Request): Promise<Response> {
         }
 
         // 응답 1건 + 토큰 사용량을 누적 원장에 기록 (삭제와 무관하게 보존).
+        // 접속 IP 도 함께 남겨 /admin 에서 IP 별 사용량을 볼 수 있게 한다.
         // 중단된 응답은 usage 이벤트가 오지 않아 기록되지 않는다 (허용).
         if (supabase && usageRef.value) {
           await recordUsageEvent(supabase, {
@@ -568,6 +569,7 @@ export async function POST(req: Request): Promise<Response> {
             model,
             input: usageRef.value.input,
             output: usageRef.value.output,
+            ip,
           });
         }
       } finally {

@@ -29,6 +29,20 @@ begin
 end $$;
 
 -- RPC 함수도 서버 전용 — anon/authenticated 가 호출하지 못하게 한다.
-revoke execute on function public.bump_usage_counters(jsonb) from anon, authenticated;
-revoke execute on function public.record_usage_event(text, text, integer, integer) from anon, authenticated;
-revoke execute on function public.record_access(text, text) from anon, authenticated;
+-- (있는 서명만 처리 — usage_tracking.sql 의 버전에 따라 record_usage_event 인자 수가 다르다)
+do $$
+declare
+  f text;
+begin
+  foreach f in array array[
+    'public.bump_usage_counters(jsonb)',
+    'public.record_usage_event(text, text, integer, integer)',
+    'public.record_usage_event(text, text, integer, integer, text)',
+    'public.record_access(text, text)'
+  ]
+  loop
+    if to_regprocedure(f) is not null then
+      execute format('revoke execute on function %s from anon, authenticated', f);
+    end if;
+  end loop;
+end $$;

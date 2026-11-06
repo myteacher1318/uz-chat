@@ -47,7 +47,7 @@ node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
 
 SQL Editor 에서 아래 파일을 순서대로 실행한다 (모두 여러 번 실행해도 안전).
 
-1. `db/usage_tracking.sql` — 누적 카운터·토큰 원장·접속 로그 + RPC. 대화를 지워도 통계가 남는 이유.
+1. `db/usage_tracking.sql` — 누적 카운터·토큰 원장·접속 로그 + RPC. 대화를 지워도 통계가 남는 이유. 2026-11-06 에 `usage_events.ip` 열이 추가됐으므로, 그 전에 실행했던 프로젝트도 **다시 실행**해야 `/admin` 의 IP 별 사용량이 쌓인다 (안 하면 IP 없이 기록되고 화면에 안내가 뜬다).
 2. `db/ip_rules.sql` — 관리자가 등록하는 제한 IP 목록(`restricted_ips`).
 3. `db/rls.sql` — 모든 테이블에 RLS 를 켜고 anon/authenticated 권한을 거둔다. 이 앱은 service role 만 쓰므로 동작에 영향이 없고, 이게 없으면 공개 anon 키만으로 대화 내용과 접속 로그를 읽을 수 있다. 실행 후 대시보드 → Advisors → Security Advisor 에 경고가 없어야 한다.
 
@@ -114,9 +114,14 @@ cron-job.org(무료) 설정:
 
 ## 관리자 (`/admin`)
 
-누적 통계(삭제와 무관), 현재 저장 상태, 모델별 사용량, 최근 7일, 접속 IP 기록(정책 배지와
-제한 버튼), Claude 로 보낼 최근 메시지 수 설정. 비밀번호를 잊으면 Render 대시보드의
+누적 통계(삭제와 무관), 현재 저장 상태, 일별 사용량, 모델별 사용량, 접속 IP 기록(정책
+배지와 제한 버튼), Claude 로 보낼 최근 메시지 수 설정. 비밀번호를 잊으면 Render 대시보드의
 `ADMIN_PASSWORD` 값을 확인한다.
+
+일별 사용량은 최근 7·30·90일을 한국 시간 기준으로 그린다 — 토큰은 입력/출력을 쌓은
+막대, 응답 수는 단위가 달라 따로. IP 를 고르면 그 IP 만 그리고, "IP별 사용량 표" 를 켜면
+기간 안의 IP 마다 응답·토큰을 집계해 보여준다 (`/api/admin/usage`). 마우스를 올리거나
+키보드로 칸을 고르면 그 날의 값을 보여주고, "일별 표" 로도 같은 값을 읽을 수 있다.
 
 ## 첨부 파일
 

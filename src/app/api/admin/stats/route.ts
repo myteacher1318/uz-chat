@@ -62,19 +62,19 @@ export async function GET(): Promise<Response> {
     const counters = await readCounters(supabase);
     const num = (k: string) => counters[k] ?? 0;
 
-    // 2) 토큰/모델 원장 — 모델별 집계 + 최근 7일 추이 (원장도 삭제와 무관)
+    // 2) 토큰/모델 원장 — 모델별 누적 집계 (원장도 삭제와 무관).
+    //    일별·IP 별 추이는 기간을 잘라 읽는 /api/admin/usage 가 맡는다.
     const modelMap = new Map<
       string,
       { count: number; inputTokens: number; outputTokens: number }
     >();
-    const dayMap = new Map<string, { messages: number; tokens: number }>();
     let ledgerTruncated = false;
     try {
       for (let page = 0; page < MAX_PAGES; page++) {
         const from = page * PAGE_SIZE;
         const { data, error } = await supabase
           .from("usage_events")
-          .select("created_at, model, input_tokens, output_tokens")
+          .select("model, input_tokens, output_tokens")
           .order("id", { ascending: true })
           .range(from, from + PAGE_SIZE - 1);
         if (error) throw error;
@@ -92,14 +92,6 @@ export async function GET(): Promise<Response> {
           m.inputTokens += inTok;
           m.outputTokens += outTok;
           modelMap.set(model, m);
-
-          if (typeof e.created_at === "string") {
-            const day = e.created_at.slice(0, 10); // UTC YYYY-MM-DD
-            const d = dayMap.get(day) ?? { messages: 0, tokens: 0 };
-            d.messages += 1;
-            d.tokens += inTok + outTok;
-            dayMap.set(day, d);
-          }
         }
         if (!data || data.length < PAGE_SIZE) break;
         if (page === MAX_PAGES - 1) ledgerTruncated = true;
@@ -111,18 +103,6 @@ export async function GET(): Promise<Response> {
     const byModel = Array.from(modelMap.entries())
       .map(([model, v]) => ({ model, ...v }))
       .sort((a, b) => b.count - a.count);
-
-    // 최근 7일 (UTC, 빈 날은 0)
-    const now = new Date();
-    const last7Days: { date: string; messages: number; tokens: number }[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const dt = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i),
-      );
-      const key = dt.toISOString().slice(0, 10);
-      const d = dayMap.get(key) ?? { messages: 0, tokens: 0 };
-      last7Days.push({ date: key, messages: d.messages, tokens: d.tokens });
-    }
 
     // 3) 현재(라이브) 저장 상태 — 지금 DB에 남아있는 대화/메시지 수
     const [{ count: liveConversations }, { count: liveMessages }] =
@@ -215,7 +195,6 @@ export async function GET(): Promise<Response> {
       },
       byModel,
       ledgerTruncated,
-      last7Days,
       access,
       ipPolicy: {
         grandfatherBefore: TRUST_GRANDFATHER_BEFORE,

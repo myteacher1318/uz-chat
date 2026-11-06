@@ -2,8 +2,18 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-
-type IpPolicy = "trusted" | "limited" | "restricted";
+import DailyUsage from "./DailyUsage";
+import {
+  PolicyBadge,
+  StatCard,
+  btnClass,
+  formatBytes,
+  formatDateTime,
+  nf,
+  readError,
+  smallBtnClass,
+  type IpPolicy,
+} from "./ui";
 
 type Stats = {
   cumulative: {
@@ -28,7 +38,6 @@ type Stats = {
     outputTokens: number;
   }[];
   ledgerTruncated?: boolean;
-  last7Days: { date: string; messages: number; tokens: number }[];
   access: {
     total: number;
     rows: {
@@ -63,55 +72,11 @@ const COUNTRY_LABEL: Record<WhoAmI["country"], string> = {
   unknown: "판정 불가 (통과)",
 };
 
-const nf = (n: number) => (n ?? 0).toLocaleString("ko-KR");
-
-function formatBytes(n: number): string {
-  if (!n || n <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  const v = n / Math.pow(1024, i);
-  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatDateTime(s: string | null): string {
-  if (!s) return "—";
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("ko-KR");
-}
-
-const POLICY_LABEL: Record<IpPolicy, { text: string; className: string }> = {
-  trusted: {
-    text: "신뢰",
-    className: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  },
-  limited: {
-    text: "제한 중",
-    className: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  },
-  restricted: {
-    text: "제한 IP",
-    className: "bg-red-500/10 text-red-500",
-  },
-};
-
-const btnClass =
-  "rounded-lg border border-black/[.1] px-3 py-1.5 text-sm transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]";
-const smallBtnClass =
-  "rounded-md border border-black/[.1] px-2 py-0.5 text-xs transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/[.15] dark:hover:bg-white/[.06]";
-
-async function readError(res: Response, fallback: string): Promise<string> {
-  try {
-    const d = await res.json();
-    if (typeof d?.error === "string") return d.error;
-  } catch {
-    /* 본문이 JSON 이 아님 */
-  }
-  return fallback;
-}
-
 export default function AdminClient() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loadingStats, setLoadingStats] = useState(true);
+  // "새로고침" 때 일별 사용량도 같이 다시 읽도록 올리는 카운터
+  const [reloadTick, setReloadTick] = useState(0);
 
   const [limit, setLimit] = useState<string>("");
   const [savedLimit, setSavedLimit] = useState<number | null>(null);
@@ -262,10 +227,6 @@ export default function AdminClient() {
     }
   }
 
-  const maxDayTokens = stats
-    ? Math.max(1, ...stats.last7Days.map((d) => d.tokens))
-    : 1;
-
   const grandfather = stats?.ipPolicy?.grandfatherBefore
     ? new Date(stats.ipPolicy.grandfatherBefore).toLocaleDateString("ko-KR")
     : "정책 도입일";
@@ -276,7 +237,13 @@ export default function AdminClient() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">관리자</h1>
         <div className="flex items-center gap-2">
-          <button onClick={() => void load()} className={btnClass}>
+          <button
+            onClick={() => {
+              setReloadTick((t) => t + 1); // 일별 사용량도 같이 다시 읽는다
+              void load();
+            }}
+            className={btnClass}
+          >
             새로고침
           </button>
           <Link href="/" className={btnClass}>
@@ -531,20 +498,28 @@ export default function AdminClient() {
             )}
           </section>
 
-          <section className="grid gap-4 md:grid-cols-2">
-            {/* 모델별 */}
-            <div className="rounded-xl border border-black/[.08] p-4 dark:border-white/[.12]">
-              <h2 className="mb-3 text-sm font-semibold">모델별 사용량 (누적)</h2>
-              {stats.byModel.length === 0 ? (
-                <p className="text-xs text-zinc-500">데이터 없음</p>
-              ) : (
+          {/* 일별·IP 별 사용량 (그래프 + 선택적 표) */}
+          <DailyUsage
+            reloadTick={reloadTick}
+            policies={Object.fromEntries(
+              stats.access.rows.map((r) => [r.ip, r.policy] as const),
+            )}
+          />
+
+          {/* 모델별 */}
+          <section className="rounded-xl border border-black/[.08] p-4 dark:border-white/[.12]">
+            <h2 className="mb-3 text-sm font-semibold">모델별 사용량 (누적)</h2>
+            {stats.byModel.length === 0 ? (
+              <p className="text-xs text-zinc-500">데이터 없음</p>
+            ) : (
+              <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-zinc-500 dark:text-zinc-400">
-                      <th className="pb-1 text-left font-medium">모델</th>
-                      <th className="pb-1 text-right font-medium">응답</th>
-                      <th className="pb-1 text-right font-medium">입력</th>
-                      <th className="pb-1 text-right font-medium">출력</th>
+                      <th className="pb-1 pr-4 text-left font-medium">모델</th>
+                      <th className="pb-1 pl-4 text-right font-medium">응답</th>
+                      <th className="pb-1 pl-4 text-right font-medium">입력</th>
+                      <th className="pb-1 pl-4 text-right font-medium">출력</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -553,55 +528,27 @@ export default function AdminClient() {
                         key={m.model}
                         className="border-b border-black/[.05] last:border-0 dark:border-white/[.08]"
                       >
-                        <td className="py-1.5 font-mono text-xs">{m.model}</td>
-                        <td className="py-1.5 text-right tabular-nums">
+                        <td className="py-1.5 pr-4 font-mono text-xs">{m.model}</td>
+                        <td className="py-1.5 pl-4 text-right tabular-nums">
                           {nf(m.count)}
                         </td>
-                        <td className="py-1.5 text-right tabular-nums text-zinc-500">
+                        <td className="py-1.5 pl-4 text-right tabular-nums text-zinc-500">
                           {nf(m.inputTokens)}
                         </td>
-                        <td className="py-1.5 text-right tabular-nums text-zinc-500">
+                        <td className="py-1.5 pl-4 text-right tabular-nums text-zinc-500">
                           {nf(m.outputTokens)}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              )}
-              {stats.ledgerTruncated && (
-                <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                  * 원장이 너무 커서 일부만 집계했습니다.
-                </p>
-              )}
-            </div>
-
-            {/* 최근 7일 */}
-            <div className="rounded-xl border border-black/[.08] p-4 dark:border-white/[.12]">
-              <h2 className="mb-3 text-sm font-semibold">
-                최근 7일 (응답 수 · 토큰)
-              </h2>
-              <div className="flex flex-col gap-1.5">
-                {stats.last7Days.map((d) => (
-                  <div key={d.date} className="flex items-center gap-2 text-xs">
-                    <span className="w-12 shrink-0 text-zinc-500">
-                      {d.date.slice(5)}
-                    </span>
-                    <span className="flex-1">
-                      <span
-                        className="block h-3 rounded bg-foreground/70"
-                        style={{
-                          width: `${(d.tokens / maxDayTokens) * 100}%`,
-                          minWidth: d.tokens ? "4px" : "0",
-                        }}
-                      />
-                    </span>
-                    <span className="w-28 text-right tabular-nums text-zinc-500">
-                      {nf(d.messages)}회 · {nf(d.tokens)}
-                    </span>
-                  </div>
-                ))}
               </div>
-            </div>
+            )}
+            {stats.ledgerTruncated && (
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                * 원장이 너무 커서 일부만 집계했습니다.
+              </p>
+            )}
           </section>
 
           {/* 접속 IP 기록 */}
@@ -631,7 +578,6 @@ export default function AdminClient() {
                   </thead>
                   <tbody>
                     {stats.access.rows.map((r) => {
-                      const p = POLICY_LABEL[r.policy] ?? POLICY_LABEL.limited;
                       return (
                         <tr
                           key={r.ip}
@@ -640,11 +586,7 @@ export default function AdminClient() {
                           <td className="py-1.5 pr-4 font-mono text-xs">{r.ip}</td>
                           <td className="py-1.5 pr-4">
                             <span className="flex items-center gap-1.5">
-                              <span
-                                className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${p.className}`}
-                              >
-                                {p.text}
-                              </span>
+                              <PolicyBadge policy={r.policy} />
                               {r.policy === "restricted" ? (
                                 <button
                                   type="button"
@@ -692,15 +634,6 @@ export default function AdminClient() {
           </section>
         </>
       ) : null}
-    </div>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="rounded-xl border border-black/[.08] p-4 dark:border-white/[.12]">
-      <div className="text-xs text-zinc-500 dark:text-zinc-400">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
     </div>
   );
 }

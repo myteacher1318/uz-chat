@@ -61,19 +61,40 @@ export async function bumpCounters(
   }
 }
 
-// 응답 1건(토큰 포함) 기록.
+// 응답 1건(토큰 포함) 기록. ip 는 /admin 의 IP 별 사용량 집계용.
 export async function recordUsageEvent(
   supabase: SupabaseClient,
-  u: { provider: string; model: string; input: number; output: number },
+  u: {
+    provider: string;
+    model: string;
+    input: number;
+    output: number;
+    ip?: string | null;
+  },
 ): Promise<void> {
+  const base = {
+    p_provider: u.provider,
+    p_model: u.model,
+    p_input: Math.max(0, Math.trunc(u.input) || 0),
+    p_output: Math.max(0, Math.trunc(u.output) || 0),
+  };
   try {
     const { error } = await supabase.rpc("record_usage_event", {
-      p_provider: u.provider,
-      p_model: u.model,
-      p_input: Math.max(0, Math.trunc(u.input) || 0),
-      p_output: Math.max(0, Math.trunc(u.output) || 0),
+      ...base,
+      p_ip: u.ip ?? null,
     });
-    if (error) throw error;
+    if (!error) return;
+    // PGRST202 = 이 인자 집합에 맞는 함수가 없음 → db/usage_tracking.sql 을 아직 다시
+    // 실행하지 않아 옛 4인자 함수만 있는 상태. IP 없이라도 기록은 남긴다.
+    if (error.code !== "PGRST202") throw error;
+    console.warn(
+      "[usage:recordUsageEvent] record_usage_event 에 p_ip 가 없습니다 — Supabase 에서 db/usage_tracking.sql 을 다시 실행하세요. IP 없이 기록합니다.",
+    );
+    const { error: legacyError } = await supabase.rpc(
+      "record_usage_event",
+      base,
+    );
+    if (legacyError) throw legacyError;
   } catch (err) {
     console.error("[usage:recordUsageEvent]", err);
   }
